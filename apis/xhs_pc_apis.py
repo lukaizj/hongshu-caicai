@@ -627,7 +627,7 @@ class XHS_Apis():
             user_list = user_list[:require_num]
         return success, msg, user_list
 
-    def get_note_out_comment(self, note_id: str, cursor: str, xsec_token: str, cookies_str: str, proxies: dict = None):
+    def get_note_out_comment(self, note_id: str, cursor: str, xsec_token: str, cookies_str: str, proxies: dict = None, xsec_source: str = 'pc_search'):
         """
             获取指定位置的笔记一级评论
             :param note_id 笔记的id
@@ -643,7 +643,8 @@ class XHS_Apis():
                 "cursor": cursor,
                 "top_comment_id": "",
                 "image_formats": "jpg,webp,avif",
-                "xsec_token": xsec_token
+                "xsec_token": xsec_token,
+                "xsec_source": xsec_source
             }
             splice_api = splice_str(api, params)
             headers, cookies, data = generate_request_params(cookies_str, splice_api, '', 'GET')
@@ -655,7 +656,7 @@ class XHS_Apis():
             msg = _log_api_error(e)
         return success, msg, res_json
 
-    def get_note_all_out_comment(self, note_id: str, xsec_token: str, cookies_str: str, proxies: dict = None):
+    def get_note_all_out_comment(self, note_id: str, xsec_token: str, cookies_str: str, proxies: dict = None, xsec_source: str = 'pc_search'):
         """
             获取笔记的全部一级评论
             :param note_id 笔记的id
@@ -666,7 +667,7 @@ class XHS_Apis():
         note_out_comment_list = []
         try:
             while True:
-                success, msg, res_json = self.get_note_out_comment(note_id, cursor, xsec_token, cookies_str, proxies)
+                success, msg, res_json = self.get_note_out_comment(note_id, cursor, xsec_token, cookies_str, proxies, xsec_source)
                 if not success:
                     raise Exception(msg)
                 comments = res_json["data"]["comments"]
@@ -682,7 +683,7 @@ class XHS_Apis():
             msg = _log_api_error(e)
         return success, msg, note_out_comment_list
 
-    def get_note_inner_comment(self, comment: dict, cursor: str, xsec_token: str, cookies_str: str, proxies: dict = None):
+    def get_note_inner_comment(self, comment: dict, cursor: str, xsec_token: str, cookies_str: str, proxies: dict = None, xsec_source: str = 'pc_search'):
         """
             获取指定位置的笔记二级评论
             :param comment 笔记的一级评论
@@ -700,7 +701,8 @@ class XHS_Apis():
                 "cursor": cursor,
                 "image_formats": "jpg,webp,avif",
                 "top_comment_id": '',
-                "xsec_token": xsec_token
+                "xsec_token": xsec_token,
+                "xsec_source": xsec_source
             }
             splice_api = splice_str(api, params)
             headers, cookies, data = generate_request_params(cookies_str, splice_api, '', 'GET')
@@ -712,7 +714,7 @@ class XHS_Apis():
             msg = _log_api_error(e)
         return success, msg, res_json
 
-    def get_note_all_inner_comment(self, comment: dict, xsec_token: str, cookies_str: str, proxies: dict = None):
+    def get_note_all_inner_comment(self, comment: dict, xsec_token: str, cookies_str: str, proxies: dict = None, xsec_source: str = 'pc_search'):
         """
             获取笔记的全部二级评论
             :param comment 笔记的一级评论
@@ -725,7 +727,7 @@ class XHS_Apis():
             cursor = comment['sub_comment_cursor']
             inner_comment_list = []
             while True:
-                success, msg, res_json = self.get_note_inner_comment(comment, cursor, xsec_token, cookies_str, proxies)
+                success, msg, res_json = self.get_note_inner_comment(comment, cursor, xsec_token, cookies_str, proxies, xsec_source)
                 if not success:
                     raise Exception(msg)
                 comments = res_json["data"]["comments"]
@@ -755,11 +757,12 @@ class XHS_Apis():
             note_id = urlParse.path.split("/")[-1]
             kvDist = _get_query_params(urlParse)
             xsec_token = kvDist.get('xsec_token', '')
-            success, msg, out_comment_list = self.get_note_all_out_comment(note_id, xsec_token, cookies_str, proxies)
+            xsec_source = kvDist.get('xsec_source', 'pc_search')
+            success, msg, out_comment_list = self.get_note_all_out_comment(note_id, xsec_token, cookies_str, proxies, xsec_source)
             if not success:
                 raise Exception(msg)
             for comment in out_comment_list:
-                success, msg, new_comment = self.get_note_all_inner_comment(comment, xsec_token, cookies_str, proxies)
+                success, msg, new_comment = self.get_note_all_inner_comment(comment, xsec_token, cookies_str, proxies, xsec_source)
                 if not success:
                     raise Exception(msg)
         except Exception as e:

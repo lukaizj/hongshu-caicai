@@ -1,5 +1,7 @@
 __pycache__
 node_modules/
+.env
+datas/
 *.so
 .Python
 build/
@@ -29,8 +31,6 @@ ENV/
 env.bak/
 venv.bak/
 .claude
-CLAUDE.md
 AGENTS.md
 .agent
-docs
 docx

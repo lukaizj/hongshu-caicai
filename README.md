@@ -246,6 +246,23 @@ Spider_XHS/
 
 ---
 
+## 🖥️ 本地 Web 采集台
+
+当前本地部署额外提供了轻量 Web 控制台，支持关键词采集、可选评论采集、实时进度和 Excel 下载。
+
+```bash
+cd /opt/Spider_XHS
+HOST=0.0.0.0 PYTHONPATH=/opt/Spider_XHS .venv/bin/python web_app.py
+```
+
+访问：`http://<server-ip>:18080`
+
+更多说明见 [`docs/local-web-console.md`](docs/local-web-console.md)。
+
+> 注意：当前 Web 控制台未加登录密码，能访问 `18080` 端口的人都能用 `.env` 中的 Cookie 触发采集。
+
+---
+
 ## 🗝️ 注意事项
 
 - `spider/spider.py` 是爬虫入口，可根据需求修改调用逻辑

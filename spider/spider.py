@@ -3,7 +3,7 @@ import os
 from loguru import logger
 from apis.xhs_pc_apis import XHS_Apis
 from xhs_utils.common_util import init
-from xhs_utils.data_util import handle_note_info, download_note, save_to_xlsx
+from xhs_utils.data_util import handle_note_info, handle_comment_info, download_note, save_to_xlsx
 
 
 class Data_Spider():
@@ -30,7 +30,7 @@ class Data_Spider():
         logger.info(f'爬取笔记信息 {note_url}: {success}, msg: {msg}')
         return success, msg, note_info
 
-    def spider_some_note(self, notes: list, cookies_str: str, base_path: dict, save_choice: str, excel_name: str = '', proxies=None):
+    def spider_some_note(self, notes: list, cookies_str: str, base_path: dict, save_choice: str, excel_name: str = '', proxies=None, progress_callback=None):
         """
         爬取一些笔记的信息
         :param notes:
@@ -41,10 +41,13 @@ class Data_Spider():
         if (save_choice == 'all' or save_choice == 'excel') and excel_name == '':
             raise ValueError('excel_name 不能为空')
         note_list = []
-        for note_url in notes:
+        total = len(notes)
+        for index, note_url in enumerate(notes, start=1):
             success, msg, note_info = self.spider_note(note_url, cookies_str, proxies)
             if note_info is not None and success:
                 note_list.append(note_info)
+            if progress_callback:
+                progress_callback('note_detail', index, total, {'success': success, 'url': note_url, 'msg': str(msg)})
         for note_info in note_list:
             if save_choice == 'all' or 'media' in save_choice:
                 download_note(note_info, base_path['media'], save_choice)
@@ -78,7 +81,7 @@ class Data_Spider():
         logger.info(f'爬取用户所有视频 {user_url}: {success}, msg: {msg}')
         return note_list, success, msg
 
-    def spider_some_search_note(self, query: str, require_num: int, cookies_str: str, base_path: dict, save_choice: str, sort_type_choice=0, note_type=0, note_time=0, note_range=0, pos_distance=0, geo: dict = None,  excel_name: str = '', proxies=None):
+    def spider_some_search_note(self, query: str, require_num: int, cookies_str: str, base_path: dict, save_choice: str, sort_type_choice=0, note_type=0, note_time=0, note_range=0, pos_distance=0, geo: dict = None,  excel_name: str = '', proxies=None, progress_callback=None):
         """
             指定数量搜索笔记，设置排序方式和笔记类型和笔记数量
             :param query 搜索的关键词
@@ -99,16 +102,49 @@ class Data_Spider():
                 notes = list(filter(lambda x: x['model_type'] == "note", notes))
                 logger.info(f'搜索关键词 {query} 笔记数量: {len(notes)}')
                 for note in notes:
-                    note_url = f"https://www.xiaohongshu.com/explore/{note['id']}?xsec_token={note['xsec_token']}"
+                    note_url = f"https://www.xiaohongshu.com/explore/{note['id']}?xsec_token={note['xsec_token']}&xsec_source=pc_search"
                     note_list.append(note_url)
+            if progress_callback:
+                progress_callback('search', len(note_list), require_num, {'success': success, 'msg': str(msg)})
             if save_choice == 'all' or save_choice == 'excel':
                 excel_name = query
-            self.spider_some_note(note_list, cookies_str, base_path, save_choice, excel_name, proxies)
+            self.spider_some_note(note_list, cookies_str, base_path, save_choice, excel_name, proxies, progress_callback)
         except Exception as e:
             success = False
             msg = e
         logger.info(f'搜索关键词 {query} 笔记: {success}, msg: {msg}')
         return note_list, success, msg
+
+    def spider_some_note_comments(self, note_urls: list, cookies_str: str, base_path: dict, excel_name: str, proxies=None, progress_callback=None):
+        if not excel_name:
+            raise ValueError('excel_name 不能为空')
+        comment_list = []
+        failed_urls = []
+        skipped_comments = 0
+        total = len(note_urls)
+        for index, note_url in enumerate(note_urls, start=1):
+            before_count = len(comment_list)
+            success, msg, comments = self.xhs_apis.get_note_all_comment(note_url, cookies_str, proxies)
+            if not success:
+                failed_urls.append(note_url)
+                logger.info(f'爬取笔记评论 {note_url}: {success}, msg: {msg}')
+                if progress_callback:
+                    progress_callback('comments', index, total, {'success': False, 'url': note_url, 'msg': str(msg), 'added': 0, 'raw': 0})
+                continue
+            for comment in comments:
+                for item in [comment] + comment.get('sub_comments', []):
+                    try:
+                        comment_list.append(handle_comment_info(item))
+                    except Exception as e:
+                        skipped_comments += 1
+                        logger.info(f'处理评论失败 {note_url}: {e}')
+            added = len(comment_list) - before_count
+            logger.info(f'爬取笔记评论 {note_url}: {success}, msg: {msg}, raw: {len(comments)}, added: {added}')
+            if progress_callback:
+                progress_callback('comments', index, total, {'success': True, 'url': note_url, 'msg': str(msg), 'added': added, 'raw': len(comments)})
+        file_path = os.path.abspath(os.path.join(base_path['excel'], f'{excel_name}.xlsx'))
+        save_to_xlsx(comment_list, file_path, type='comment')
+        return len(comment_list), failed_urls, skipped_comments
 
 if __name__ == '__main__':
     """

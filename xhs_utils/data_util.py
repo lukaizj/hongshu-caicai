@@ -144,33 +144,27 @@ def handle_note_info(data):
     }
 
 def handle_comment_info(data):
-    note_id = data['note_id']
-    note_url = data['note_url']
-    comment_id = data['id']
-    user_id = data['user_info']['user_id']
-    home_url = f'https://www.xiaohongshu.com/user/profile/{user_id}'
-    nickname = data['user_info']['nickname']
-    avatar = data['user_info']['image']
-    content = data['content']
-    show_tags = data['show_tags']
-    like_count = data['like_count']
-    upload_time = timestamp_to_str(data['create_time'])
-    try:
-        ip_location = data['ip_location']
-    except KeyError:
-        ip_location = '未知'
+    user_info = data.get('user_info') or {}
+    note_id = data.get('note_id', '')
+    note_url = data.get('note_url', '')
+    comment_id = data.get('id', '')
+    user_id = user_info.get('user_id', '')
+    home_url = f'https://www.xiaohongshu.com/user/profile/{user_id}' if user_id else ''
+    nickname = user_info.get('nickname', '')
+    avatar = user_info.get('image', '')
+    content = data.get('content', '')
+    show_tags = data.get('show_tags', '')
+    like_count = data.get('like_count', 0)
+    upload_time = timestamp_to_str(data.get('create_time', 0)) if data.get('create_time') else ''
+    ip_location = data.get('ip_location', '未知')
     pictures = []
-    try:
-        pictures_temp = data['pictures']
-        for picture in pictures_temp:
-            try:
-                pictures.append(picture['info_list'][1]['url'])
-                # success, msg, img_url = XHS_Apis.get_note_no_water_img(picture['info_list'][1]['url'])
-                # pictures.append(img_url)
-            except (KeyError, IndexError, TypeError):
-                pass
-    except (KeyError, TypeError):
-        pass
+    for picture in data.get('pictures') or []:
+        try:
+            pictures.append(picture['info_list'][1]['url'])
+            # success, msg, img_url = XHS_Apis.get_note_no_water_img(picture['info_list'][1]['url'])
+            # pictures.append(img_url)
+        except (KeyError, IndexError, TypeError):
+            pass
     return {
         'note_id': note_id,
         'note_url': note_url,
