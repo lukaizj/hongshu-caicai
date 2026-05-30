@@ -1,12 +1,12 @@
-# Local Web Console
+# 红薯采采本地 Web 采集台
 
-This repository is upstream `cv-cat/Spider_XHS` plus a local lightweight browser console for keyword note collection and optional comment export.
+红薯采采提供轻量浏览器控制台，用于关键词笔记采集、可选评论采集、实时进度展示和 Excel 下载。
 
 ## Start
 
 ```bash
-cd /opt/Spider_XHS
-HOST=0.0.0.0 PYTHONPATH=/opt/Spider_XHS .venv/bin/python web_app.py
+cd /opt/hongshu-caicai
+HOST=0.0.0.0 PYTHONPATH=/opt/hongshu-caicai .venv/bin/python web_app.py
 ```
 
 Open:
@@ -21,16 +21,20 @@ Default values:
 |---|---:|---|
 | `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` for external access. |
 | `PORT` | `18080` | Web console port. |
+| `APP_USERNAME` | `admin` | Login username. |
+| `APP_PASSWORD` | `admin` | Login password. |
 | `COOKIES` | from `.env` | Logged-in Xiaohongshu Web Cookie. |
 
 ## UI workflow
 
-1. Enter a keyword.
-2. Choose post count, 1-50.
-3. Optionally enable `同步采集评论`.
-4. Start the job.
-5. Watch live progress, timeline events, and metrics.
-6. Download generated Excel files.
+1. Log in to the console.
+2. Check Cookie status or paste a new Cookie.
+3. Enter a keyword.
+4. Choose post count, 1-50.
+5. Optionally enable `同步采集评论`.
+6. Start the job.
+7. Watch live progress, timeline events, and metrics.
+8. Download generated Excel files.
 
 Outputs:
 
@@ -95,12 +99,12 @@ If a comments job finishes with `0` comments, possible causes:
 ## Verification
 
 ```bash
-cd /opt/Spider_XHS
-PYTHONPATH=/opt/Spider_XHS .venv/bin/python -m py_compile web_app.py spider/spider.py xhs_utils/data_util.py apis/xhs_pc_apis.py
+cd /opt/hongshu-caicai
+PYTHONPATH=/opt/hongshu-caicai .venv/bin/python -m py_compile web_app.py spider/spider.py xhs_utils/data_util.py apis/xhs_pc_apis.py
 ```
 
 Expected smoke result from the current Cookie during setup: keyword `榴莲`, count `1`, comments enabled produced one note row and 94 comment rows.
 
 ## Security
 
-The current external service has no login. Anyone who reaches `:18080` can trigger scraping with the configured Cookie. Keep the port limited to trusted networks or add authentication before wider exposure.
+The current external service has app login, but anyone with valid console credentials can trigger scraping with the configured Cookie. Keep the port limited to trusted networks and change default credentials before wider exposure.

@@ -1,15 +1,15 @@
-# Spider_XHS Local Notes
+# 红薯采采 Local Notes
 
 ## Current local additions
 
-This checkout adds a lightweight local web console on top of upstream `cv-cat/Spider_XHS`.
+This checkout runs 红薯采采, a lightweight local browser console for keyword note collection and optional comment export.
 
 - Web entry: `web_app.py`
 - Bind defaults: `HOST=127.0.0.1`, `PORT=18080`
 - Current external launch pattern:
   ```bash
-  cd /opt/Spider_XHS
-  HOST=0.0.0.0 PYTHONPATH=/opt/Spider_XHS .venv/bin/python web_app.py
+  cd /opt/hongshu-caicai
+  HOST=0.0.0.0 PYTHONPATH=/opt/hongshu-caicai .venv/bin/python web_app.py
   ```
 - Browser URL: `http://<server-ip>:18080`
 
@@ -37,8 +37,8 @@ This checkout adds a lightweight local web console on top of upstream `cv-cat/Sp
 ## Verification commands
 
 ```bash
-cd /opt/Spider_XHS
-PYTHONPATH=/opt/Spider_XHS .venv/bin/python -m py_compile web_app.py spider/spider.py xhs_utils/data_util.py apis/xhs_pc_apis.py
+cd /opt/hongshu-caicai
+PYTHONPATH=/opt/hongshu-caicai .venv/bin/python -m py_compile web_app.py spider/spider.py xhs_utils/data_util.py apis/xhs_pc_apis.py
 ```
 
 Quick API smoke test:
@@ -56,6 +56,6 @@ curl -s 'http://127.0.0.1:18080/api/status?id=<job_id>'
 
 ## Safety notes
 
-- Current external listener has no password. Anyone who can reach port `18080` can trigger scraping with the configured Cookie.
+- Current external listener has app login but still holds a live Xiaohongshu Cookie after login.
 - Keep `.env` private. It contains logged-in Xiaohongshu Cookie.
 - Comments collection creates more requests than note search; test with 1-10 posts first.

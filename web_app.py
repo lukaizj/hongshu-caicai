@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -5,19 +8,68 @@ import threading
 import time
 import urllib.parse
 import uuid
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from spider.spider import Data_Spider
 from xhs_utils.common_util import init
+from xhs_utils.cookie_util import trans_cookies
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "18080"))
+APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "admin")
+APP_SESSION_SECRET = os.environ.get("APP_SESSION_SECRET") or base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+APP_SESSION_COOKIE = "hongshu_caicai_session"
+APP_SESSION_MAX_AGE = 12 * 60 * 60
 MAX_COUNT = 50
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_DIR = os.path.join(PROJECT_DIR, "datas", "excel_datas")
+ENV_PATH = os.path.join(PROJECT_DIR, ".env")
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 MAX_EVENTS = 80
+
+
+def encode_session(username):
+    expires = int(time.time()) + APP_SESSION_MAX_AGE
+    payload = f"{username}:{expires}"
+    signature = hmac.new(APP_SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    token = f"{payload}:{signature}".encode("utf-8")
+    return base64.urlsafe_b64encode(token).decode("ascii")
+
+
+def decode_session(token):
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        username, expires, signature = decoded.rsplit(":", 2)
+        payload = f"{username}:{expires}"
+        expected = hmac.new(APP_SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return ""
+        if int(expires) < int(time.time()):
+            return ""
+        return username
+    except Exception:
+        return ""
+
+
+def parse_cookie_header(header):
+    cookie = SimpleCookie()
+    try:
+        cookie.load(header or "")
+    except Exception:
+        return {}
+    return {key: morsel.value for key, morsel in cookie.items()}
+
+
+def session_cookie_header(username):
+    token = encode_session(username)
+    return f"{APP_SESSION_COOKIE}={token}; Max-Age={APP_SESSION_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax"
+
+
+def clear_session_cookie_header():
+    return f"{APP_SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
 
 
 def validate_keyword(keyword):
@@ -39,6 +91,80 @@ def validate_count(raw_count):
     if count < 1 or count > MAX_COUNT:
         raise ValueError(f"数量必须在 1 到 {MAX_COUNT} 之间")
     return count
+
+
+def validate_cookie_string(cookies_str):
+    cookies_str = (cookies_str or "").strip()
+    if not cookies_str:
+        raise ValueError("Cookie 不能为空")
+    cookies = trans_cookies(cookies_str)
+    missing = [key for key in ("a1", "web_session") if not cookies.get(key)]
+    if missing:
+        raise ValueError("Cookie 缺少必要字段：" + ", ".join(missing))
+    return cookies_str
+
+
+def mask_cookie(cookies_str):
+    if not cookies_str:
+        return ""
+    cookies = trans_cookies(cookies_str)
+    keys = [key for key in ("a1", "web_session", "webId", "gid", "websectiga") if cookies.get(key)]
+    return " / ".join(f"{key}=***{cookies[key][-6:]}" for key in keys)
+
+
+def load_cookie_string():
+    cookies_str, _ = init()
+    return (cookies_str or "").strip()
+
+
+def get_cookie_status():
+    cookies_str = load_cookie_string()
+    if not cookies_str:
+        return {"configured": False, "message": "未配置 Cookie", "summary": ""}
+    try:
+        cookies = trans_cookies(cookies_str)
+        missing = [key for key in ("a1", "web_session") if not cookies.get(key)]
+        if missing:
+            return {"configured": False, "message": "Cookie 缺少字段：" + ", ".join(missing), "summary": mask_cookie(cookies_str)}
+        return {"configured": True, "message": "Cookie 已配置", "summary": mask_cookie(cookies_str)}
+    except Exception as exc:
+        return {"configured": False, "message": f"Cookie 解析失败：{exc}", "summary": ""}
+
+
+def quote_env_value(value):
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def save_cookie_string(cookies_str):
+    cookies_str = validate_cookie_string(cookies_str)
+    lines = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r", encoding="utf-8") as file:
+            lines = file.read().splitlines()
+    written = False
+    new_lines = []
+    for line in lines:
+        if line.startswith("COOKIES="):
+            new_lines.append("COOKIES=" + quote_env_value(cookies_str))
+            written = True
+        else:
+            new_lines.append(line)
+    if not written:
+        new_lines.append("COOKIES=" + quote_env_value(cookies_str))
+    with open(ENV_PATH, "w", encoding="utf-8") as file:
+        file.write("\n".join(new_lines).rstrip() + "\n")
+    os.environ["COOKIES"] = cookies_str
+
+
+def clear_cookie_string():
+    lines = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r", encoding="utf-8") as file:
+            lines = file.read().splitlines()
+    new_lines = [line for line in lines if not line.startswith("COOKIES=")]
+    with open(ENV_PATH, "w", encoding="utf-8") as file:
+        file.write("\n".join(new_lines).rstrip() + ("\n" if new_lines else ""))
+    os.environ.pop("COOKIES", None)
 
 
 def now_ts():
@@ -207,7 +333,7 @@ def render_page():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>小红书采集台 · Spider_XHS</title>
+  <title>红薯采采 · 小红书采集台</title>
   <style>
     :root {
       --paper: #f8f1e8;
@@ -238,20 +364,24 @@ def render_page():
         var(--paper);
     }
     .shell { max-width: 1180px; margin: 0 auto; padding: 38px 24px 52px; }
-    .masthead { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 30px; animation: rise .52s cubic-bezier(.16,1,.3,1); }
+    .masthead { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 30px; }
     .overline { font-family: var(--font-mono); letter-spacing: .18em; font-size: 12px; color: var(--seal-red); text-transform: uppercase; }
     h1 { margin: 8px 0 8px; font-family: var(--font-display); font-size: clamp(42px, 7vw, 86px); line-height: .92; letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--ink-soft); font-size: 17px; }
+    .mast-actions { display: flex; gap: 10px; align-items: center; }
     .status-pill { min-width: 118px; padding: 10px 14px; border: 1px solid var(--line); background: rgba(255,250,241,.64); font-family: var(--font-mono); text-align: center; color: var(--ink-soft); box-shadow: 0 10px 28px var(--shadow); }
     .grid { display: grid; grid-template-columns: minmax(320px, .82fr) minmax(420px, 1.18fr); gap: 26px; align-items: start; }
+    .auth-grid { display: grid; grid-template-columns: minmax(320px, .72fr) minmax(420px, 1.28fr); gap: 18px; margin-bottom: 24px; }
     .card { position: relative; background: var(--card); border: 1px solid var(--line); box-shadow: 0 22px 70px var(--shadow); backdrop-filter: blur(10px); }
-    .command { padding: 28px; animation: slide-left .56s cubic-bezier(.16,1,.3,1); }
+    .auth-card { padding: 22px; }
+    .command { padding: 28px; }
     .command:before { content: ""; position: absolute; inset: 0 auto 0 0; width: 8px; background: linear-gradient(180deg, var(--xhs-red), var(--seal-red)); }
     .section-title { margin: 0 0 22px; font-family: var(--font-display); font-size: 30px; }
     label { display: block; margin: 18px 0 8px; color: var(--ink-soft); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
-    input[type="text"], input[type="number"] {
+    input[type="text"], input[type="number"], textarea {
       width: 100%; border: 0; border-bottom: 2px solid var(--line); padding: 13px 2px 12px; background: transparent; color: var(--ink); font-size: 22px; font-family: var(--font-display); outline: none; transition: border-color .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s;
     }
+    textarea { min-height: 86px; resize: vertical; font-size: 13px; font-family: var(--font-mono); line-height: 1.55; }
     input:focus { border-color: var(--xhs-red); box-shadow: 0 10px 22px rgba(255,36,66,.08); }
     .row { display: grid; grid-template-columns: 140px 1fr; gap: 20px; align-items: end; }
     .switch-line { display: flex; justify-content: space-between; gap: 18px; align-items: center; margin-top: 24px; padding: 15px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -268,8 +398,15 @@ def render_page():
     .primary { width: 100%; margin-top: 26px; border: 0; padding: 16px 18px; background: var(--seal-red); color: #fff8ef; font-size: 17px; letter-spacing: .08em; cursor: pointer; box-shadow: 0 18px 34px rgba(185,22,45,.25); transition: transform .22s, background .22s, box-shadow .22s; }
     .primary:hover { transform: translateY(-2px); background: #8f1021; box-shadow: 0 22px 44px rgba(185,22,45,.34); }
     .primary:disabled { opacity: .58; cursor: not-allowed; transform: none; }
+    .secondary { border: 1px solid var(--line); padding: 10px 12px; background: rgba(255,250,241,.62); color: var(--ink); cursor: pointer; font-family: var(--font-body); }
+    .secondary.danger { color: var(--seal-red); border-color: rgba(185,22,45,.28); }
+    .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+    .cookie-status { padding: 12px 14px; border: 1px solid var(--line); background: rgba(255,250,241,.56); font-family: var(--font-mono); font-size: 13px; color: var(--ink-soft); }
+    .cookie-status.ok { color: var(--ink); border-color: rgba(184,135,70,.65); }
     .hint { margin: 16px 0 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
-    .dossier { padding: 28px; min-height: 560px; animation: slide-right .56s cubic-bezier(.16,1,.3,1); }
+    .steps { margin: 14px 0 0; padding: 12px 14px 12px 30px; border: 1px dashed rgba(32,24,22,.18); color: var(--ink-soft); font-size: 13px; line-height: 1.7; background: rgba(255,250,241,.42); }
+    .steps code { font-family: var(--font-mono); color: var(--seal-red); }
+    .dossier { padding: 28px; min-height: 560px; }
     .dossier-head { display: flex; justify-content: space-between; gap: 18px; align-items: start; margin-bottom: 22px; }
     .state { padding: 8px 12px; border: 1px solid var(--line); font-family: var(--font-mono); color: var(--ink-soft); background: rgba(255,250,241,.7); }
     .state.running { color: var(--seal-red); border-color: rgba(255,36,66,.28); box-shadow: 0 0 0 5px rgba(255,36,66,.08); }
@@ -281,14 +418,14 @@ def render_page():
     .metric strong { display: block; margin-top: 6px; font-family: var(--font-mono); font-size: 22px; }
     .progress-top { display: flex; justify-content: space-between; color: var(--ink-soft); font-family: var(--font-mono); font-size: 13px; }
     .track { position: relative; height: 14px; margin: 10px 0 26px; border: 1px solid var(--line); background: rgba(32,24,22,.05); overflow: hidden; }
-    .fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--seal-red), var(--xhs-red)); transition: width .35s cubic-bezier(.2,.8,.2,1); }
-    .fill.running:after { content: ""; display: block; height: 100%; background: repeating-linear-gradient(45deg, rgba(255,255,255,.18) 0 8px, transparent 8px 16px); animation: hatch 1.2s linear infinite; }
+    .fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--seal-red), var(--xhs-red)); }
+    .fill.running { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.18) 0 8px, transparent 8px 16px), linear-gradient(90deg, var(--seal-red), var(--xhs-red)); background-size: 28px 28px, 100% 100%; }
     .timeline { position: relative; margin: 0 0 22px; padding-left: 26px; }
     .timeline:before { content: ""; position: absolute; left: 8px; top: 8px; bottom: 8px; width: 2px; background: linear-gradient(var(--xhs-red), rgba(185,22,45,.16)); }
     .step { position: relative; padding: 0 0 18px; color: var(--muted); }
     .step:before { content: ""; position: absolute; left: -24px; top: 5px; width: 12px; height: 12px; border: 1px solid currentColor; background: var(--paper); }
     .step.active { color: var(--seal-red); }
-    .step.active:before { background: var(--xhs-red); border-color: var(--xhs-red); animation: pulse 1.8s infinite; }
+    .step.active:before { background: var(--xhs-red); border-color: var(--xhs-red); }
     .step.done { color: var(--ink); }
     .step.done:before { border-color: var(--seal-red); box-shadow: inset 0 0 0 3px var(--paper); background: var(--seal-red); }
     .step strong { display: block; font-size: 15px; }
@@ -301,12 +438,7 @@ def render_page():
     .downloads { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
     .download { display: inline-block; padding: 12px 14px; border-left: 5px solid var(--seal-red); border-top: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--ink); background: rgba(255,250,241,.74); text-decoration: none; transition: transform .2s, background .2s; }
     .download:hover { transform: translateY(-2px); background: #fffaf1; }
-    @keyframes rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
-    @keyframes slide-left { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
-    @keyframes slide-right { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
-    @keyframes hatch { to { transform: translateX(18px); } }
-    @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,36,66,.35); } 50% { box-shadow: 0 0 0 9px rgba(255,36,66,0); } }
-    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, 1fr); } .masthead { flex-direction: column; } }
+    @media (max-width: 860px) { .grid, .auth-grid { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, 1fr); } .masthead { flex-direction: column; } }
     @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition-duration: .01ms !important; } }
   </style>
 </head>
@@ -314,12 +446,44 @@ def render_page():
   <main class="shell">
     <header class="masthead">
       <div>
-        <div class="overline">SPIDER_XHS / DATA CONSOLE</div>
-        <h1>小红书采集台</h1>
+        <div class="overline">HONGSHU CAICAI / DATA CONSOLE</div>
+        <h1>红薯采采</h1>
         <p class="subtitle">关键词驱动的笔记与评论采集任务台</p>
       </div>
-      <div id="mastState" class="status-pill">IDLE</div>
+      <div class="mast-actions">
+        <button id="logoutBtn" class="secondary" type="button">退出登录</button>
+        <div id="mastState" class="status-pill">IDLE</div>
+      </div>
     </header>
+
+    <section class="auth-grid">
+      <section class="card auth-card">
+        <div class="overline">ACCOUNT</div>
+        <h2 class="section-title">Cookie 状态</h2>
+        <div id="cookieStatus" class="cookie-status">读取中</div>
+        <div class="auth-actions">
+          <button id="refreshCookieBtn" class="secondary" type="button">刷新状态</button>
+          <button id="clearCookieBtn" class="secondary danger" type="button">清除 Cookie</button>
+        </div>
+        <label for="cookieInput">手动替换 Cookie</label>
+        <textarea id="cookieInput" placeholder="粘贴 Request Headers 里的 cookie 全量内容"></textarea>
+        <ol class="steps">
+          <li>电脑浏览器打开网页版小红书并登录。</li>
+          <li>按 <code>F12</code> 打开开发者工具，进入 <code>Network</code>。</li>
+          <li>刷新页面或点任意小红书请求，找到 <code>scripting</code> 请求。</li>
+          <li>在 <code>Request Headers</code> 中复制 <code>cookie</code> 的完整内容。</li>
+          <li>粘贴到上方输入框，点击保存 Cookie。</li>
+        </ol>
+        <button id="saveCookieBtn" class="primary" type="button">保存 Cookie</button>
+      </section>
+
+      <section class="card auth-card">
+        <div class="overline">NEXT</div>
+        <h2 class="section-title">一键获取 Cookie</h2>
+        <p class="hint">API 扫码已移除：它确认登录但拿不到采集必需的 <code>web_session</code>。下一步可改成真实浏览器自动登录：页面显示网页版二维码，扫码后自动读取浏览器 Cookie。</p>
+        <p class="hint">当前推荐方式仍是左侧手动粘贴浏览器 Cookie，成功率最高。</p>
+      </section>
+    </section>
 
     <section class="grid">
       <form id="collectForm" class="card command">
@@ -337,7 +501,7 @@ def render_page():
           </div>
         </div>
         <button id="startBtn" class="primary" type="submit">开始采集</button>
-        <p class="hint">外部访问未加密码。采集期间请勿高频刷新；任务进度会自动更新。</p>
+        <p class="hint">当前已登录 admin。采集期间请勿高频刷新；任务进度会自动更新。</p>
       </form>
 
       <section class="card dossier">
@@ -369,6 +533,7 @@ def render_page():
     </section>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
   <script>
     const form = document.getElementById('collectForm');
     const startBtn = document.getElementById('startBtn');
@@ -384,7 +549,193 @@ def render_page():
     const mComments = document.getElementById('mComments');
     const mFailed = document.getElementById('mFailed');
     const steps = [...document.querySelectorAll('.step')];
+    const cookieStatus = document.getElementById('cookieStatus');
+    const refreshCookieBtn = document.getElementById('refreshCookieBtn');
+    const clearCookieBtn = document.getElementById('clearCookieBtn');
+    const saveCookieBtn = document.getElementById('saveCookieBtn');
+    const cookieInput = document.getElementById('cookieInput');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const reduceMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let pollTimer = null;
+    let fillLoopTween = null;
+    let activeStepTween = null;
+    let lastStage = '';
+    let lastState = '';
+    let lastEventsKey = '';
+    let lastDownloadsKey = '';
+
+    function hasGsap() {
+      return Boolean(window.gsap);
+    }
+
+    function prefersReducedMotion() {
+      return reduceMotionQuery.matches;
+    }
+
+    function motionDuration(seconds) {
+      return prefersReducedMotion() ? 0 : seconds;
+    }
+
+    function stopLoopingMotion() {
+      if (fillLoopTween) {
+        fillLoopTween.kill();
+        fillLoopTween = null;
+      }
+      if (activeStepTween) {
+        activeStepTween.kill();
+        activeStepTween = null;
+      }
+      if (hasGsap()) gsap.set(steps, { clearProps: 'boxShadow' });
+    }
+
+    function runIntroMotion() {
+      if (!hasGsap()) return;
+      gsap.set(['.masthead', '.auth-card', '.command', '.dossier'], { autoAlpha: 1, clearProps: 'visibility' });
+      if (prefersReducedMotion()) return;
+
+      gsap.timeline({ defaults: { duration: 0.56, ease: 'power3.out' } })
+        .from('.masthead', { y: 16, autoAlpha: 0 })
+        .from('.auth-card', { y: 14, autoAlpha: 0, stagger: 0.08 }, '-=0.30')
+        .from('.command', { x: -16, autoAlpha: 0 }, '-=0.22')
+        .from('.dossier', { x: 16, autoAlpha: 0 }, '-=0.46');
+    }
+
+    function animateProgress(percent, isRunning) {
+      const safePercent = Math.max(0, Math.min(100, Number(percent || 0)));
+      fillEl.className = 'fill ' + (isRunning ? 'running' : '');
+
+      if (!hasGsap()) {
+        fillEl.style.width = `${safePercent}%`;
+        return;
+      }
+
+      gsap.to(fillEl, { width: `${safePercent}%`, duration: motionDuration(0.42), ease: 'power2.out', overwrite: 'auto' });
+
+      if (!isRunning || prefersReducedMotion()) {
+        if (fillLoopTween) {
+          fillLoopTween.kill();
+          fillLoopTween = null;
+        }
+        gsap.set(fillEl, { backgroundPosition: '0px 0px, 0px 0px' });
+        return;
+      }
+
+      if (!fillLoopTween) {
+        fillLoopTween = gsap.to(fillEl, { backgroundPosition: '28px 0px, 0px 0px', duration: 1.2, ease: 'none', repeat: -1 });
+      }
+    }
+
+    function animateMetric(el, nextValue) {
+      const next = Number(nextValue || 0);
+      const current = Number(el.textContent || 0);
+      if (!hasGsap() || prefersReducedMotion() || current === next) {
+        el.textContent = next;
+        return;
+      }
+
+      const counter = { value: current };
+      gsap.to(counter, {
+        value: next,
+        duration: 0.38,
+        ease: 'power2.out',
+        overwrite: 'auto',
+        onUpdate: () => { el.textContent = Math.round(counter.value); }
+      });
+      gsap.fromTo(el, { y: -2 }, { y: 0, duration: 0.22, ease: 'power2.out', overwrite: 'auto', clearProps: 'transform' });
+    }
+
+    function animateStatusChange(el) {
+      if (!hasGsap() || prefersReducedMotion()) return;
+      gsap.fromTo(el, { y: -4, autoAlpha: 0.72 }, { y: 0, autoAlpha: 1, duration: 0.24, ease: 'power2.out', overwrite: 'auto', clearProps: 'transform,opacity,visibility' });
+    }
+
+    function animateTimeline(stage, state) {
+      const active = stageIndex(stage);
+      steps.forEach((step, index) => {
+        step.classList.toggle('done', active > index || state === 'success');
+        step.classList.toggle('active', active === index && state === 'running');
+      });
+
+      if (!hasGsap()) return;
+      const changed = stage !== lastStage || state !== lastState;
+      if (!changed) return;
+
+      if (activeStepTween) {
+        activeStepTween.kill();
+        activeStepTween = null;
+      }
+
+      const activeStep = steps[active];
+      if (activeStep && state === 'running') {
+        gsap.fromTo(activeStep, { x: -4 }, { x: 0, duration: motionDuration(0.28), ease: 'power2.out', overwrite: 'auto', clearProps: 'transform' });
+        if (!prefersReducedMotion()) {
+          activeStepTween = gsap.to(activeStep, { boxShadow: '0 0 0 6px rgba(255,36,66,0.08)', duration: 0.9, ease: 'sine.inOut', repeat: -1, yoyo: true, overwrite: 'auto' });
+        }
+      }
+
+      if (state === 'success' || state === 'failed') stopLoopingMotion();
+      lastStage = stage || '';
+      lastState = state || '';
+    }
+
+    function eventsKey(events) {
+      return (events || []).map(event => [event.time, event.title, event.detail, event.level].join('|')).join('::');
+    }
+
+    function downloadsKey(downloads) {
+      return (downloads || []).map(item => [item.label, item.file].join('|')).join('::');
+    }
+
+    function renderEvents(events) {
+      const key = eventsKey(events);
+      eventsEl.innerHTML = (events || []).slice().reverse().map(event => `
+        <div class="event ${event.level || 'info'}"><time>${event.time}</time><div><b>${escapeHtml(event.title)}</b><br>${escapeHtml(event.detail || '')}</div></div>
+      `).join('');
+
+      if (hasGsap() && !prefersReducedMotion() && key !== lastEventsKey) {
+        const firstEvent = eventsEl.querySelector('.event');
+        if (firstEvent) {
+          gsap.fromTo(firstEvent, { y: -8, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.26, ease: 'power2.out', overwrite: 'auto', clearProps: 'transform,opacity,visibility' });
+        }
+      }
+      lastEventsKey = key;
+    }
+
+    function renderDownloads(downloads) {
+      const key = downloadsKey(downloads);
+      downloadsEl.innerHTML = (downloads || []).map(item => {
+        const href = '/download?file=' + encodeURIComponent(item.file);
+        return `<a class="download" href="${href}">↓ ${escapeHtml(item.label)}</a>`;
+      }).join('');
+
+      if (hasGsap() && !prefersReducedMotion() && key !== lastDownloadsKey) {
+        gsap.fromTo(downloadsEl.querySelectorAll('.download'), { y: 10, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.34, ease: 'back.out(1.4)', stagger: 0.06, overwrite: 'auto', clearProps: 'transform,opacity,visibility' });
+      }
+      lastDownloadsKey = key;
+    }
+
+    function bindPressMotion(selector) {
+      document.querySelectorAll(selector).forEach(el => {
+        el.addEventListener('pointerdown', () => {
+          if (!hasGsap() || prefersReducedMotion() || el.disabled) return;
+          gsap.to(el, { scale: 0.985, duration: 0.08, ease: 'power1.out', overwrite: 'auto' });
+        });
+        const release = () => {
+          if (!hasGsap() || prefersReducedMotion()) return;
+          gsap.to(el, { scale: 1, duration: 0.16, ease: 'power2.out', overwrite: 'auto', clearProps: 'transform' });
+        };
+        el.addEventListener('pointerup', release);
+        el.addEventListener('pointerleave', release);
+      });
+    }
+
+    reduceMotionQuery.addEventListener('change', () => {
+      if (!prefersReducedMotion()) return;
+      stopLoopingMotion();
+      if (hasGsap()) {
+        gsap.set(['.masthead', '.auth-card', '.command', '.dossier'], { autoAlpha: 1, x: 0, y: 0, clearProps: 'transform,opacity,visibility' });
+      }
+    });
 
     function stageIndex(stage) {
       return ['init', 'search', 'notes', 'comments', 'complete'].indexOf(stage);
@@ -392,40 +743,51 @@ def render_page():
 
     function setState(job) {
       const labels = { queued: '排队中', running: '采集中', success: '已完成', failed: '异常' };
+      const stateChanged = (job.state || '') !== lastState;
       stateEl.textContent = labels[job.state] || '待命';
       mastState.textContent = (job.state || 'idle').toUpperCase();
       stateEl.className = 'state ' + (job.state || '');
-      fillEl.className = 'fill ' + (job.state === 'running' ? 'running' : '');
       messageEl.textContent = job.message || '等待任务';
       percentEl.textContent = `${job.percent || 0}%`;
-      fillEl.style.width = `${job.percent || 0}%`;
-      mTarget.textContent = job.count || 0;
-      mNotes.textContent = job.metrics?.notes || 0;
-      mComments.textContent = job.metrics?.comments || 0;
-      mFailed.textContent = job.metrics?.failed_comments || 0;
-
-      const active = stageIndex(job.stage);
-      steps.forEach((step, index) => {
-        step.classList.toggle('done', active > index || job.state === 'success');
-        step.classList.toggle('active', active === index && job.state === 'running');
-      });
-
-      eventsEl.innerHTML = (job.events || []).slice().reverse().map(event => `
-        <div class="event ${event.level || 'info'}"><time>${event.time}</time><div><b>${escapeHtml(event.title)}</b><br>${escapeHtml(event.detail || '')}</div></div>
-      `).join('');
-
-      downloadsEl.innerHTML = (job.downloads || []).map(item => {
-        const href = '/download?file=' + encodeURIComponent(item.file);
-        return `<a class="download" href="${href}">↓ ${escapeHtml(item.label)}</a>`;
-      }).join('');
+      animateProgress(job.percent || 0, job.state === 'running');
+      animateMetric(mTarget, job.count || 0);
+      animateMetric(mNotes, job.metrics?.notes || 0);
+      animateMetric(mComments, job.metrics?.comments || 0);
+      animateMetric(mFailed, job.metrics?.failed_comments || 0);
+      if (stateChanged) {
+        animateStatusChange(stateEl);
+        animateStatusChange(mastState);
+      }
+      animateTimeline(job.stage, job.state);
+      renderEvents(job.events || []);
+      renderDownloads(job.downloads || []);
     }
 
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
     }
 
+    function redirectIfUnauthorized(res) {
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return true;
+      }
+      return false;
+    }
+
+    async function refreshCookieStatus() {
+      const res = await fetch('/api/cookie/status');
+      if (redirectIfUnauthorized(res)) return;
+      const payload = await res.json();
+      cookieStatus.textContent = payload.message + (payload.summary ? ' · ' + payload.summary : '');
+      cookieStatus.className = 'cookie-status ' + (payload.configured ? 'ok' : '');
+      animateStatusChange(cookieStatus);
+      return payload;
+    }
+
     async function poll(jobId) {
       const res = await fetch('/api/status?id=' + encodeURIComponent(jobId));
+      if (redirectIfUnauthorized(res)) return;
       const job = await res.json();
       setState(job);
       if (job.state === 'success' || job.state === 'failed') {
@@ -435,6 +797,47 @@ def render_page():
         startBtn.textContent = '开始采集';
       }
     }
+
+    runIntroMotion();
+    bindPressMotion('.primary, .secondary');
+
+    refreshCookieBtn.addEventListener('click', refreshCookieStatus);
+
+    logoutBtn.addEventListener('click', async () => {
+      await fetch('/api/logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+
+    clearCookieBtn.addEventListener('click', async () => {
+      if (!confirm('确认清除当前 Cookie？清除后采集会失败，直到重新登录或手动保存。')) return;
+      const res = await fetch('/api/cookie/clear', { method: 'POST' });
+      if (redirectIfUnauthorized(res)) return;
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || '清除失败');
+      cookieInput.value = '';
+      await refreshCookieStatus();
+    });
+
+    saveCookieBtn.addEventListener('click', async () => {
+      saveCookieBtn.disabled = true;
+      try {
+        const data = new URLSearchParams();
+        data.set('cookies', cookieInput.value);
+        const res = await fetch('/api/cookie/save', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '保存失败');
+        cookieInput.value = '';
+        await refreshCookieStatus();
+      } catch (error) {
+        cookieStatus.textContent = error.message;
+        cookieStatus.className = 'cookie-status';
+      } finally {
+        saveCookieBtn.disabled = false;
+      }
+    });
+
+    refreshCookieStatus();
 
     form.addEventListener('submit', async event => {
       event.preventDefault();
@@ -446,6 +849,7 @@ def render_page():
       const data = new URLSearchParams(new FormData(form));
       try {
         const res = await fetch('/api/start', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || '任务启动失败');
         await poll(payload.id);
@@ -461,26 +865,134 @@ def render_page():
 </html>""".replace("{{MAX_COUNT}}", str(MAX_COUNT))
 
 
+def render_login_page(error=""):
+    safe_error = html.escape(error)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · 红薯采采</title>
+  <style>
+    :root {{ --paper: #f8f1e8; --ink: #201816; --ink-soft: #786a62; --seal-red: #b9162d; --line: rgba(32,24,22,.14); --shadow: rgba(80,34,24,.16); --font-display: "Iowan Old Style", "Songti SC", serif; --font-body: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif; }}
+    * {{ box-sizing: border-box; }}
+    body {{ min-height: 100vh; margin: 0; display: grid; place-items: center; color: var(--ink); font-family: var(--font-body); background: radial-gradient(circle at 20% 20%, rgba(255,36,66,.12), transparent 28rem), var(--paper); }}
+    .card {{ width: min(420px, calc(100vw - 32px)); padding: 34px; border: 1px solid var(--line); background: rgba(255,250,241,.86); box-shadow: 0 22px 70px var(--shadow); }}
+    .overline {{ letter-spacing: .18em; font-size: 12px; color: var(--seal-red); }}
+    h1 {{ margin: 8px 0 22px; font-family: var(--font-display); font-size: 48px; line-height: .95; }}
+    label {{ display: block; margin: 18px 0 8px; color: var(--ink-soft); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }}
+    input {{ width: 100%; border: 0; border-bottom: 2px solid var(--line); padding: 13px 2px 12px; background: transparent; color: var(--ink); font-size: 22px; outline: none; }}
+    input:focus {{ border-color: var(--seal-red); }}
+    button {{ width: 100%; margin-top: 28px; border: 0; padding: 16px 18px; background: var(--seal-red); color: #fff8ef; font-size: 17px; letter-spacing: .08em; cursor: pointer; }}
+    .error {{ margin: 16px 0 0; color: var(--seal-red); min-height: 22px; }}
+    .hint {{ margin: 18px 0 0; color: var(--ink-soft); font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <form class="card" method="post" action="/api/login">
+    <div class="overline">HONGSHU CAICAI</div>
+    <h1>登录</h1>
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" value="admin" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">进入采集台</button>
+    <p class="error">{safe_error}</p>
+    <p class="hint">默认账号：admin / admin</p>
+  </form>
+  <script>
+    document.querySelector('form').addEventListener('submit', async event => {{
+      event.preventDefault();
+      const form = event.currentTarget;
+      const res = await fetch('/api/login', {{ method: 'POST', body: new URLSearchParams(new FormData(form)) }});
+      const payload = await res.json();
+      if (res.ok) {{ window.location.href = '/'; return; }}
+      document.querySelector('.error').textContent = payload.error || '登录失败';
+    }});
+  </script>
+</body>
+</html>"""
+
+
 class SpiderHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/login":
+            if self.is_authenticated():
+                self.redirect("/")
+                return
+            self.send_html(render_login_page())
+            return
         if parsed.path == "/":
+            if not self.require_auth(parsed.path):
+                return
             self.send_html(render_page())
             return
         if parsed.path == "/api/status":
+            if not self.require_auth(parsed.path):
+                return
             self.handle_status(parsed.query)
             return
+        if parsed.path == "/api/cookie/status":
+            if not self.require_auth(parsed.path):
+                return
+            self.send_json(get_cookie_status())
+            return
         if parsed.path == "/download":
+            if not self.require_auth(parsed.path):
+                return
             self.handle_download(parsed.query)
             return
         self.send_error(404)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/login":
+            self.handle_login()
+            return
+        if parsed.path == "/api/logout":
+            self.send_json({"ok": True}, headers=[("Set-Cookie", clear_session_cookie_header())])
+            return
         if parsed.path == "/api/start":
+            if not self.require_auth(parsed.path):
+                return
             self.handle_start()
             return
+        if parsed.path == "/api/cookie/save":
+            if not self.require_auth(parsed.path):
+                return
+            self.handle_cookie_save()
+            return
+        if parsed.path == "/api/cookie/clear":
+            if not self.require_auth(parsed.path):
+                return
+            self.handle_cookie_clear()
+            return
         self.send_error(404)
+
+    def is_authenticated(self):
+        cookies = parse_cookie_header(self.headers.get("Cookie", ""))
+        return decode_session(cookies.get(APP_SESSION_COOKIE, "")) == APP_USERNAME
+
+    def require_auth(self, path):
+        if self.is_authenticated():
+            return True
+        if path.startswith("/api/"):
+            self.send_json({"error": "未登录"}, 401)
+        else:
+            self.redirect("/login")
+        return False
+
+    def handle_login(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        form = urllib.parse.parse_qs(body)
+        username = form.get("username", [""])[0]
+        password = form.get("password", [""])[0]
+        if hmac.compare_digest(username, APP_USERNAME) and hmac.compare_digest(password, APP_PASSWORD):
+            self.send_json({"ok": True}, headers=[("Set-Cookie", session_cookie_header(username))])
+            return
+        self.send_json({"error": "用户名或密码错误"}, 401)
 
     def handle_start(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -506,6 +1018,20 @@ class SpiderHandler(BaseHTTPRequestHandler):
             return
         self.send_json(job)
 
+    def handle_cookie_save(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        form = urllib.parse.parse_qs(body)
+        try:
+            save_cookie_string(form.get("cookies", [""])[0])
+            self.send_json(get_cookie_status())
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+    def handle_cookie_clear(self):
+        clear_cookie_string()
+        self.send_json(get_cookie_status())
+
     def handle_download(self, query):
         params = urllib.parse.parse_qs(query)
         filename = params.get("file", [""])[0]
@@ -529,19 +1055,28 @@ class SpiderHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def send_html(self, content):
+    def redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def send_html(self, content, status=200, headers=None):
         data = content.encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -552,5 +1087,5 @@ class SpiderHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     os.chdir(PROJECT_DIR)
     server = ThreadingHTTPServer((HOST, PORT), SpiderHandler)
-    print(f"Spider_XHS web app running at http://{HOST}:{PORT}")
+    print(f"红薯采采 web app running at http://{HOST}:{PORT}")
     server.serve_forever()
