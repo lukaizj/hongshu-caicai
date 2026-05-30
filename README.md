@@ -100,6 +100,15 @@ HOST=0.0.0.0 PYTHONPATH=/opt/hongshu-caicai .venv/bin/python web_app.py
 
 ## API 接口
 
+接口需要先登录采集台。手机验证码登录相关接口如下：
+
+| 接口 | 方法 | 参数 | 说明 |
+|---|---|---|---|
+| `/api/cookie/phone/send` | POST | `phone=<手机号>&zone=86` | 发送短信验证码，创建 5 分钟登录会话 |
+| `/api/cookie/phone/login` | POST | `session_id=<会话ID>&code=<验证码>` | 验证短信码并自动保存 Cookie |
+
+正常使用建议走页面表单，浏览器会自动携带采集台登录态。
+
 ### 启动任务
 
 ```bash

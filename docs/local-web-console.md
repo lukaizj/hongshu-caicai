@@ -48,6 +48,22 @@ Outputs:
 
 The console can send a Xiaohongshu SMS verification code to the bound phone number. After the code is submitted, the server exchanges it for a session, validates `a1` and `web_session`, then writes `COOKIES=` to `.env`. Failed or expired SMS sessions do not overwrite the current Cookie.
 
+SMS login endpoints:
+
+| Endpoint | Method | Body | Purpose |
+|---|---|---|---|
+| `/api/cookie/phone/send` | POST | `phone=<phone>&zone=86` | Send SMS code and create a 5-minute login session. |
+| `/api/cookie/phone/login` | POST | `session_id=<id>&code=<sms_code>` | Exchange SMS code for Cookie and save it to `.env`. |
+
+Example:
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/api/cookie/phone/send \
+  -d 'phone=13800000000&zone=86'
+```
+
+The endpoints require console login. Use the browser UI for normal operation so session cookies are handled automatically.
+
 ## API
 
 ### Start a job
