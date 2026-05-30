@@ -54,11 +54,56 @@ class XHSLoginApi:
                 data=data_str.encode('utf-8'),
                 timeout=REQUEST_TIMEOUT
             )
-            res = resp.json()
+            res = self._parse_response_json(resp)
             return res.get('data', {}).get('secPoisonId')
         except Exception as e:
             logger.debug(f'fetch sec_poison_id failed: {e}')
             return None
+
+    @staticmethod
+    def _find_session_value(value):
+        if isinstance(value, dict):
+            for key in ('web_session', 'session', 'sessionId', 'session_id', 'token'):
+                if value.get(key):
+                    return value[key]
+            for nested in value.values():
+                session = XHSLoginApi._find_session_value(nested)
+                if session:
+                    return session
+        if isinstance(value, list):
+            for item in value:
+                session = XHSLoginApi._find_session_value(item)
+                if session:
+                    return session
+        return None
+
+    @staticmethod
+    def _describe_json_shape(value, depth=0):
+        if depth >= 3:
+            return type(value).__name__
+        if isinstance(value, dict):
+            return {key: XHSLoginApi._describe_json_shape(nested, depth + 1) for key, nested in value.items()}
+        if isinstance(value, list):
+            return [XHSLoginApi._describe_json_shape(value[0], depth + 1)] if value else []
+        return type(value).__name__
+
+    @staticmethod
+    def _parse_response_json(resp):
+        try:
+            return resp.json()
+        except Exception:
+            text = resp.text.strip()
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(text):
+                if char != '{':
+                    continue
+                try:
+                    value, _ = decoder.raw_decode(text[index:])
+                    if isinstance(value, dict):
+                        return value
+                except Exception:
+                    continue
+            raise
 
     def _fetch_gid(self, cookies):
         api = '/api/sec/v1/shield/webprofile'
@@ -122,7 +167,7 @@ class XHSLoginApi:
         for key, value in resp.cookies.items():
             cookies[key] = value
 
-        res = resp.json()
+        res = self._parse_response_json(resp)
         if not res.get('success'):
             return False, res.get('msg', '未知错误'), None
         data = res.get('data') or {}
@@ -149,18 +194,22 @@ class XHSLoginApi:
         for key, value in resp.cookies.items():
             cookies[key] = value
 
-        res = resp.json()
+        res = self._parse_response_json(resp)
         status = (res.get('data') or {}).get('codeStatus')
         if status is None:
             return False, res.get('msg', '二维码状态响应缺少 codeStatus'), cookies
 
         if status == 2:
-            cookies = self._login_by_qrcode_status(qr_id, code, cookies)
+            session = self._find_session_value(res)
+            if session:
+                cookies['web_session'] = session
+            if not cookies.get('web_session'):
+                cookies = self._login_by_qrcode_status(qr_id, code, cookies)
 
         status_map = {
             0: (False, '请扫描二维码'),
             1: (False, '请确认登录'),
-            2: (True, '验证成功'),
+            2: (bool(cookies.get('web_session')), '验证成功' if cookies.get('web_session') else '等待登录 Cookie 下发'),
             3: (False, '二维码已过期'),
         }
         success, msg = status_map.get(status, (False, f'未知状态: {status}'))
@@ -168,24 +217,54 @@ class XHSLoginApi:
 
     def _login_by_qrcode_status(self, qr_id, code, cookies):
         api = '/api/sns/web/v1/login/qrcode/status'
-        params = {"qr_id": qr_id, "code": code}
-        splice_api = splice_str(api, params)
+        attempts = [
+            ('GET', {"qr_id": qr_id, "code": code}, None),
+            ('GET', {"qrId": qr_id, "code": code}, None),
+            ('POST', None, {"qr_id": qr_id, "code": code}),
+            ('POST', None, {"qrId": qr_id, "code": code}),
+        ]
 
-        headers, _ = generate_headers(cookies['a1'], splice_api, method='GET')
-        resp = requests.get(
-            self.base_url + splice_api,
-            headers=headers, cookies=cookies,
-            timeout=REQUEST_TIMEOUT
-        )
-        for key, value in resp.cookies.items():
-            cookies[key] = value
+        for method, params, body in attempts:
+            request_cookies = dict(cookies)
+            if method == 'GET':
+                splice_api = splice_str(api, params)
+                headers, _ = generate_headers(request_cookies['a1'], splice_api, method='GET')
+                resp = requests.get(
+                    self.base_url + splice_api,
+                    headers=headers, cookies=request_cookies,
+                    timeout=REQUEST_TIMEOUT
+                )
+            else:
+                headers, data = generate_headers(request_cookies['a1'], api, body)
+                resp = requests.post(
+                    self.base_url + api,
+                    headers=headers, cookies=request_cookies, data=data,
+                    timeout=REQUEST_TIMEOUT
+                )
 
-        res = resp.json()
-        if res.get('success') and 'login_info' in res.get('data', {}):
-            login_info = res['data']['login_info']
-            if 'session' in login_info and 'web_session' not in cookies:
-                cookies['web_session'] = login_info['session']
+            for key, value in resp.cookies.items():
+                request_cookies[key] = value
 
+            try:
+                res = self._parse_response_json(resp)
+            except Exception as exc:
+                logger.info(f'QR login {method} cookie keys: {sorted(request_cookies.keys())}')
+                logger.warning(f'QR login {method} returned non-JSON response: {exc}; prefix={resp.text[:80]!r}')
+                cookies.update(request_cookies)
+                if request_cookies.get('web_session'):
+                    cookies['web_session'] = request_cookies['web_session']
+                    return cookies
+                continue
+
+            logger.info(f'QR login {method} cookie keys: {sorted(request_cookies.keys())}')
+            logger.info(f'QR login {method} response shape: {self._describe_json_shape(res)}')
+            session = request_cookies.get('web_session') or self._find_session_value(res)
+            cookies.update(request_cookies)
+            if session:
+                cookies['web_session'] = session
+                return cookies
+
+        logger.warning('QR login responses did not contain session-like field')
         return cookies
 
     def get_user_info(self, cookies):
@@ -200,7 +279,7 @@ class XHSLoginApi:
         for key, value in resp.cookies.items():
             cookies[key] = value
 
-        res = resp.json()
+        res = self._parse_response_json(resp)
         return res.get('success', False), res.get('data', {}), cookies
 
     def send_phone_code(self, phone, cookies, zone='86'):
@@ -214,7 +293,7 @@ class XHSLoginApi:
             headers=headers, cookies=cookies,
             timeout=REQUEST_TIMEOUT
         )
-        res = resp.json()
+        res = self._parse_response_json(resp)
         return res.get('success', False), res.get('msg', ''), res
 
     def login_by_phone(self, phone, code, cookies, zone='86'):
@@ -228,7 +307,7 @@ class XHSLoginApi:
             headers=headers, cookies=cookies,
             timeout=REQUEST_TIMEOUT
         )
-        res = resp.json()
+        res = self._parse_response_json(resp)
         if not res.get('success'):
             return False, res.get('msg', '验证码验证失败'), {'cookies': cookies}
         mobile_token = (res.get('data') or {}).get('mobile_token')
@@ -246,7 +325,7 @@ class XHSLoginApi:
         for key, value in resp.cookies.items():
             cookies[key] = value
 
-        res = resp.json()
+        res = self._parse_response_json(resp)
         if not res.get('success'):
             return False, res.get('msg', '登录失败'), {'cookies': cookies}
         session = (res.get('data') or {}).get('session')
@@ -280,7 +359,7 @@ class XHSLoginApi:
     def qrcode_login(self, show_in_terminal=True):
         logger.info('[1/4] 正在生成初始cookies...')
         cookies = self.generate_init_cookies()
-        logger.info(f'{cookies}')
+        logger.info(f'初始 Cookie 字段: {sorted(cookies.keys())}')
 
         logger.info('[2/4] 正在获取二维码...')
         success, msg, qr_data = self.generate_qrcode(cookies)
@@ -316,13 +395,13 @@ class XHSLoginApi:
             logger.warning('获取用户信息失败，但cookies可能仍有效')
 
         cookies_str = self.cookies_to_str(cookies)
-        logger.success(f'登录成功!\ncookies:\n{cookies_str}')
+        logger.success('登录成功，Cookie 已生成')
         return cookies_str
 
     def phone_login(self):
         logger.info('[1/4] 正在生成初始cookies...')
         cookies = self.generate_init_cookies()
-        logger.info(f'a1={cookies["a1"]}')
+        logger.info(f'初始 Cookie 字段: {sorted(cookies.keys())}')
 
         phone = input('请输入手机号: ')
         logger.info('[2/4] 正在发送验证码...')
@@ -346,7 +425,7 @@ class XHSLoginApi:
             logger.info(f'用户: {user_info.get("nickname", "未知")} (RedID: {user_info.get("red_id", "未知")})')
 
         cookies_str = self.cookies_to_str(cookies)
-        logger.success(f'登录成功!\ncookies:\n{cookies_str}')
+        logger.success('登录成功，Cookie 已生成')
         return cookies_str
 
 

@@ -11,6 +11,7 @@ import uuid
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from apis.xhs_pc_login_apis import XHSLoginApi
 from spider.spider import Data_Spider
 from xhs_utils.common_util import init
 from xhs_utils.cookie_util import trans_cookies
@@ -28,6 +29,9 @@ EXCEL_DIR = os.path.join(PROJECT_DIR, "datas", "excel_datas")
 ENV_PATH = os.path.join(PROJECT_DIR, ".env")
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+PHONE_SESSIONS = {}
+PHONE_LOCK = threading.Lock()
+PHONE_SESSION_TTL = 300
 MAX_EVENTS = 80
 
 
@@ -109,7 +113,7 @@ def mask_cookie(cookies_str):
         return ""
     cookies = trans_cookies(cookies_str)
     keys = [key for key in ("a1", "web_session", "webId", "gid", "websectiga") if cookies.get(key)]
-    return " / ".join(f"{key}=***{cookies[key][-6:]}" for key in keys)
+    return " / ".join(f"{key}=***{str(cookies[key])[-4:]}" for key in keys)
 
 
 def load_cookie_string():
@@ -165,6 +169,60 @@ def clear_cookie_string():
     with open(ENV_PATH, "w", encoding="utf-8") as file:
         file.write("\n".join(new_lines).rstrip() + ("\n" if new_lines else ""))
     os.environ.pop("COOKIES", None)
+
+
+def create_phone_session(phone, zone):
+    phone = (phone or "").strip()
+    zone = (zone or "86").strip() or "86"
+    if not phone:
+        raise ValueError("手机号不能为空")
+
+    login_api = XHSLoginApi()
+    cookies = login_api.generate_init_cookies()
+    success, msg, res = login_api.send_phone_code(phone, cookies, zone)
+    if not success:
+        raise ValueError(msg or "验证码发送失败")
+
+    session_id = uuid.uuid4().hex
+    with PHONE_LOCK:
+        PHONE_SESSIONS[session_id] = {
+            "phone": phone,
+            "zone": zone,
+            "cookies": cookies,
+            "created_at": time.time(),
+        }
+    return {"session_id": session_id, "message": "验证码已发送，请查看手机短信", "expires_in": PHONE_SESSION_TTL}
+
+
+def login_phone_session(session_id, code):
+    code = (code or "").strip()
+    if not session_id:
+        raise ValueError("缺少手机登录会话")
+    if not code:
+        raise ValueError("验证码不能为空")
+
+    with PHONE_LOCK:
+        session = PHONE_SESSIONS.get(session_id)
+        if not session:
+            raise ValueError("验证码会话已失效，请重新发送")
+        if time.time() - session["created_at"] > PHONE_SESSION_TTL:
+            PHONE_SESSIONS.pop(session_id, None)
+            raise ValueError("验证码已过期，请重新发送")
+        phone = session["phone"]
+        zone = session["zone"]
+        cookies = dict(session["cookies"])
+
+    login_api = XHSLoginApi()
+    success, msg, data = login_api.login_by_phone(phone, code, cookies, zone)
+    if not success:
+        raise ValueError(msg or "验证码登录失败")
+
+    cookies = data["cookies"]
+    cookie_str = login_api.cookies_to_str(cookies)
+    save_cookie_string(cookie_str)
+    with PHONE_LOCK:
+        PHONE_SESSIONS.pop(session_id, None)
+    return {"message": "Cookie 获取成功，已自动保存", "cookie_status": get_cookie_status()}
 
 
 def now_ts():
@@ -378,7 +436,7 @@ def render_page():
     .command:before { content: ""; position: absolute; inset: 0 auto 0 0; width: 8px; background: linear-gradient(180deg, var(--xhs-red), var(--seal-red)); }
     .section-title { margin: 0 0 22px; font-family: var(--font-display); font-size: 30px; }
     label { display: block; margin: 18px 0 8px; color: var(--ink-soft); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
-    input[type="text"], input[type="number"], textarea {
+    input[type="text"], input[type="number"], input[type="tel"], textarea {
       width: 100%; border: 0; border-bottom: 2px solid var(--line); padding: 13px 2px 12px; background: transparent; color: var(--ink); font-size: 22px; font-family: var(--font-display); outline: none; transition: border-color .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s;
     }
     textarea { min-height: 86px; resize: vertical; font-size: 13px; font-family: var(--font-mono); line-height: 1.55; }
@@ -438,6 +496,10 @@ def render_page():
     .downloads { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
     .download { display: inline-block; padding: 12px 14px; border-left: 5px solid var(--seal-red); border-top: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--ink); background: rgba(255,250,241,.74); text-decoration: none; transition: transform .2s, background .2s; }
     .download:hover { transform: translateY(-2px); background: #fffaf1; }
+    .login-status { min-height: 24px; margin-top: 14px; color: var(--ink-soft); font-size: 14px; }
+    .login-status.ok { color: var(--seal-red); font-weight: 700; }
+    .phone-grid { display: grid; grid-template-columns: 86px 1fr; gap: 14px; align-items: end; }
+    .login-note { margin: 18px 0 0; padding: 13px 14px; border: 1px dashed rgba(32,24,22,.18); color: var(--ink-soft); font-size: 13px; line-height: 1.7; background: rgba(255,250,241,.42); }
     @media (max-width: 860px) { .grid, .auth-grid { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, 1fr); } .masthead { flex-direction: column; } }
     @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition-duration: .01ms !important; } }
   </style>
@@ -478,10 +540,27 @@ def render_page():
       </section>
 
       <section class="card auth-card">
-        <div class="overline">NEXT</div>
+        <div class="overline">PHONE LOGIN</div>
         <h2 class="section-title">一键获取 Cookie</h2>
-        <p class="hint">API 扫码已移除：它确认登录但拿不到采集必需的 <code>web_session</code>。下一步可改成真实浏览器自动登录：页面显示网页版二维码，扫码后自动读取浏览器 Cookie。</p>
-        <p class="hint">当前推荐方式仍是左侧手动粘贴浏览器 Cookie，成功率最高。</p>
+        <p class="hint">使用小红书绑定手机号接收验证码，验证成功后自动保存采集 Cookie。</p>
+        <div class="phone-grid">
+          <div>
+            <label for="phoneZone">区号</label>
+            <input id="phoneZone" type="text" value="86" inputmode="numeric">
+          </div>
+          <div>
+            <label for="phoneInput">手机号</label>
+            <input id="phoneInput" type="tel" placeholder="输入手机号" autocomplete="tel">
+          </div>
+        </div>
+        <label for="phoneCodeInput">短信验证码</label>
+        <input id="phoneCodeInput" type="text" placeholder="收到验证码后填写" inputmode="numeric" autocomplete="one-time-code">
+        <div id="phoneLoginStatus" class="login-status">先发送验证码</div>
+        <div class="auth-actions">
+          <button id="sendPhoneCodeBtn" class="primary" type="button">发送验证码</button>
+          <button id="phoneLoginBtn" class="secondary" type="button" disabled>登录并保存 Cookie</button>
+        </div>
+        <div class="login-note">验证码会话 5 分钟内有效。成功后自动写入 .env；失败不会覆盖当前 Cookie。</div>
       </section>
     </section>
 
@@ -555,8 +634,15 @@ def render_page():
     const saveCookieBtn = document.getElementById('saveCookieBtn');
     const cookieInput = document.getElementById('cookieInput');
     const logoutBtn = document.getElementById('logoutBtn');
+    const phoneZone = document.getElementById('phoneZone');
+    const phoneInput = document.getElementById('phoneInput');
+    const phoneCodeInput = document.getElementById('phoneCodeInput');
+    const phoneLoginStatus = document.getElementById('phoneLoginStatus');
+    const sendPhoneCodeBtn = document.getElementById('sendPhoneCodeBtn');
+    const phoneLoginBtn = document.getElementById('phoneLoginBtn');
     const reduceMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let pollTimer = null;
+    let phoneSessionId = '';
     let fillLoopTween = null;
     let activeStepTween = null;
     let lastStage = '';
@@ -798,10 +884,67 @@ def render_page():
       }
     }
 
+    function setPhoneStatus(message, ok = false) {
+      phoneLoginStatus.textContent = message;
+      phoneLoginStatus.className = 'login-status ' + (ok ? 'ok' : '');
+      animateStatusChange(phoneLoginStatus);
+    }
+
+    async function sendPhoneCode() {
+      sendPhoneCodeBtn.disabled = true;
+      phoneLoginBtn.disabled = true;
+      setPhoneStatus('正在发送验证码');
+      try {
+        const data = new URLSearchParams();
+        data.set('phone', phoneInput.value);
+        data.set('zone', phoneZone.value);
+        const res = await fetch('/api/cookie/phone/send', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '验证码发送失败');
+        phoneSessionId = payload.session_id;
+        phoneCodeInput.value = '';
+        phoneLoginBtn.disabled = false;
+        setPhoneStatus(payload.message, true);
+      } catch (error) {
+        phoneSessionId = '';
+        setPhoneStatus(error.message);
+      } finally {
+        sendPhoneCodeBtn.disabled = false;
+      }
+    }
+
+    async function loginByPhoneCode() {
+      if (!phoneSessionId) {
+        setPhoneStatus('请先发送验证码');
+        return;
+      }
+      phoneLoginBtn.disabled = true;
+      setPhoneStatus('正在登录并保存 Cookie');
+      try {
+        const data = new URLSearchParams();
+        data.set('session_id', phoneSessionId);
+        data.set('code', phoneCodeInput.value);
+        const res = await fetch('/api/cookie/phone/login', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '验证码登录失败');
+        phoneSessionId = '';
+        phoneCodeInput.value = '';
+        setPhoneStatus(payload.message, true);
+        await refreshCookieStatus();
+      } catch (error) {
+        phoneLoginBtn.disabled = false;
+        setPhoneStatus(error.message);
+      }
+    }
+
     runIntroMotion();
     bindPressMotion('.primary, .secondary');
 
     refreshCookieBtn.addEventListener('click', refreshCookieStatus);
+    sendPhoneCodeBtn.addEventListener('click', sendPhoneCode);
+    phoneLoginBtn.addEventListener('click', loginByPhoneCode);
 
     logoutBtn.addEventListener('click', async () => {
       await fetch('/api/logout', { method: 'POST' });
@@ -968,6 +1111,16 @@ class SpiderHandler(BaseHTTPRequestHandler):
                 return
             self.handle_cookie_clear()
             return
+        if parsed.path == "/api/cookie/phone/send":
+            if not self.require_auth(parsed.path):
+                return
+            self.handle_cookie_phone_send()
+            return
+        if parsed.path == "/api/cookie/phone/login":
+            if not self.require_auth(parsed.path):
+                return
+            self.handle_cookie_phone_login()
+            return
         self.send_error(404)
 
     def is_authenticated(self):
@@ -1031,6 +1184,24 @@ class SpiderHandler(BaseHTTPRequestHandler):
     def handle_cookie_clear(self):
         clear_cookie_string()
         self.send_json(get_cookie_status())
+
+    def handle_cookie_phone_send(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        form = urllib.parse.parse_qs(body)
+        try:
+            self.send_json(create_phone_session(form.get("phone", [""])[0], form.get("zone", ["86"])[0]), 201)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+    def handle_cookie_phone_login(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        form = urllib.parse.parse_qs(body)
+        try:
+            self.send_json(login_phone_session(form.get("session_id", [""])[0], form.get("code", [""])[0]))
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 400)
 
     def handle_download(self, query):
         params = urllib.parse.parse_qs(query)

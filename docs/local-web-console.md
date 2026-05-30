@@ -28,13 +28,14 @@ Default values:
 ## UI workflow
 
 1. Log in to the console.
-2. Check Cookie status or paste a new Cookie.
-3. Enter a keyword.
-4. Choose post count, 1-50.
-5. Optionally enable `同步采集评论`.
-6. Start the job.
-7. Watch live progress, timeline events, and metrics.
-8. Download generated Excel files.
+2. Check Cookie status, use phone SMS login, or paste a new Cookie.
+3. Send the SMS code, enter it in the console, and let the server save a usable Cookie.
+4. Enter a keyword.
+5. Choose post count, 1-50.
+6. Optionally enable `同步采集评论`.
+7. Start the job.
+8. Watch live progress, timeline events, and metrics.
+9. Download generated Excel files.
 
 Outputs:
 
@@ -42,6 +43,10 @@ Outputs:
 |---|---|
 | Notes | `datas/excel_datas/<keyword>.xlsx` |
 | Comments | `datas/excel_datas/<keyword>_comments.xlsx` |
+
+## Cookie SMS login
+
+The console can send a Xiaohongshu SMS verification code to the bound phone number. After the code is submitted, the server exchanges it for a session, validates `a1` and `web_session`, then writes `COOKIES=` to `.env`. Failed or expired SMS sessions do not overwrite the current Cookie.
 
 ## API
 
