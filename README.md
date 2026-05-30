@@ -6,21 +6,11 @@
 
 ## 功能演示
 
-![红薯采采演示](demo_output/hongshu-caicai-demo.gif)
+🎬 **介绍视频（带旁白+字幕）**
 
-### 截图
+[![红薯采采介绍视频](demo_output/hongshu-caicai-intro.mp4)](demo_output/hongshu-caicai-intro.mp4)
 
-| 登录 | 采集工作台 |
-|------|-----------|
-| ![登录](demo_output/01-login.png) | ![采集](demo_output/03-collect-tab.png) |
-
-| URL 采集 | 用户主页采集 | 去水印 |
-|----------|-------------|--------|
-| ![URL](demo_output/04-mode-url.png) | ![用户](demo_output/05-mode-user.png) | ![水印](demo_output/06-watermark.png) |
-
-| Cookie 管理 | AI 分析 |
-|-------------|---------|
-| ![Cookie](demo_output/07-cookie-tab.png) | ![AI](demo_output/08-ai-tab.png) |
+> 点击上图下载或播放完整介绍视频（约 80 秒，带中文旁白和字幕）
 
 ## 核心功能
 
