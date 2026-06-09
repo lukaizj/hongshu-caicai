@@ -1353,12 +1353,24 @@ def render_page():
       viralMNotes.textContent = job.metrics?.notes || 0;
       viralMComments.textContent = job.metrics?.comments || 0;
       viralMFailed.textContent = job.metrics?.failed_comments || 0;
-      viralDownloads.innerHTML = (job.downloads || []).map(function(item) {
-        return '<a class="download" href="/download?file=' + encodeURIComponent(item.file) + '">↓ ' + escapeHtml(item.label) + '</a>';
-      }).join('');
-      viralEvents.innerHTML = (job.events || []).slice().reverse().map(function(event) {
-        return '<div class="event ' + (event.level||'info') + '"><time>' + event.time + '</time><div><b>' + escapeHtml(event.title) + '</b><br>' + escapeHtml(event.detail||'') + '</div></div>';
-      }).join('');
+
+      const jobDownloads = job.downloads || [];
+      const nextDownloadsKey = downloadsKey(jobDownloads);
+      if (nextDownloadsKey !== lastViralDownloadsKey) {
+        viralDownloads.innerHTML = jobDownloads.map(function(item) {
+          return '<a class="download" href="/download?file=' + encodeURIComponent(item.file) + '">↓ ' + escapeHtml(item.label) + '</a>';
+        }).join('');
+        lastViralDownloadsKey = nextDownloadsKey;
+      }
+
+      const jobEvents = job.events || [];
+      const nextEventsKey = eventsKey(jobEvents);
+      if (nextEventsKey !== lastViralEventsKey) {
+        viralEvents.innerHTML = jobEvents.slice().reverse().map(function(event) {
+          return '<div class="event ' + (event.level||'info') + '"><time>' + event.time + '</time><div><b>' + escapeHtml(event.title) + '</b><br>' + escapeHtml(event.detail||'') + '</div></div>';
+        }).join('');
+        lastViralEventsKey = nextEventsKey;
+      }
     }
 
     function resetDraftPreview(message) {
@@ -1690,7 +1702,7 @@ def render_page():
         .replace(/\\n\\n/g, '</p><p style="margin:8px 0">')
         .replace(/^(.+)$/gm, function(m) { return m.startsWith('<') ? m : '<p style="margin:8px 0">' + m + '</p>'; })
         .replace(/```([\\s\\S]*?)```/g, '<pre style="background:rgba(32,24,22,.04);padding:12px;overflow:auto;font-family:var(--font-mono);font-size:13px">$1</pre>')
-        .replace(/<\\/p><p style="margin:8px 0"><\\/p>/g, '');
+        .split('</p><p style="margin:8px 0"></p>').join('');
     }
     analyzeBtn.addEventListener('click', async function() {
       analyzeBtn.disabled = true; analyzeBtn.textContent = '\u5206\u6790\u4e2d\u2026';
@@ -1731,26 +1743,42 @@ def render_page():
     }
 
     async function pollViralJob(jobId) {
-      const res = await fetch('/api/status?id=' + encodeURIComponent(jobId));
-      if (redirectIfUnauthorized(res)) return;
-      const job = await res.json();
-      setViralJobState(job);
-      if (job.state === 'success' || job.state === 'failed') {
-        clearInterval(viralPollTimer); viralPollTimer = null;
-        viralStartBtn.disabled = false; viralStartBtn.textContent = '\u91c7\u96c6\u7206\u6b3e\u6837\u672c';
-        if (job.state === 'success') {
-          currentViralJobId = job.id;
-          viralAnalyzeBtn.disabled = !aiConfigured;
-          viralAnalyzeNoConfig.style.display = aiConfigured ? 'none' : 'block';
-          draftGenerateBtn.disabled = true;
-          triggerConfetti();
+      if (viralJobPollInFlight) return;
+      viralJobPollInFlight = true;
+      try {
+        const res = await fetch('/api/status?id=' + encodeURIComponent(jobId));
+        if (redirectIfUnauthorized(res)) { clearInterval(viralPollTimer); viralPollTimer = null; return; }
+        const job = await res.json();
+        if (!res.ok) throw new Error(job.error || '\u7206\u6b3e\u91c7\u96c6\u72b6\u6001\u83b7\u53d6\u5931\u8d25');
+        setViralJobState(job);
+        if (job.state === 'success' || job.state === 'failed') {
+          clearInterval(viralPollTimer); viralPollTimer = null;
+          viralStartBtn.disabled = false; viralStartBtn.textContent = '\u91c7\u96c6\u7206\u6b3e\u6837\u672c';
+          if (job.state === 'success') {
+            currentViralJobId = job.id;
+            viralAnalyzeBtn.disabled = !aiConfigured;
+            viralAnalyzeNoConfig.style.display = aiConfigured ? 'none' : 'block';
+            draftGenerateBtn.disabled = true;
+            triggerConfetti();
+          }
         }
+      } catch (error) {
+        clearInterval(viralPollTimer); viralPollTimer = null;
+        setViralJobState({ state: 'failed', percent: 100, message: error.message, events: [{ time: new Date().toLocaleTimeString(), title: '\u72b6\u6001\u8f6e\u8be2\u5931\u8d25', detail: error.message, level: 'error' }], metrics: {} });
+        viralStartBtn.disabled = false; viralStartBtn.textContent = '\u91c7\u96c6\u7206\u6b3e\u6837\u672c';
+      } finally {
+        viralJobPollInFlight = false;
       }
     }
 
     viralForm.addEventListener('submit', async function(event) {
       event.preventDefault();
       clearInterval(viralPollTimer); clearInterval(viralAnalysisPollTimer); clearInterval(draftPollTimer);
+      viralJobPollInFlight = false;
+      viralAnalysisFailures = 0;
+      draftFailures = 0;
+      lastViralEventsKey = '';
+      lastViralDownloadsKey = '';
       viralAnalysisId = ''; currentViralJobId = '';
       viralAnalysisResult.style.display = 'none'; viralAnalysisContent.innerHTML = '';
       viralAnalyzeBtn.disabled = true; draftGenerateBtn.disabled = true;
@@ -1773,6 +1801,7 @@ def render_page():
 
     viralAnalyzeBtn.addEventListener('click', async function() {
       if (!currentViralJobId) return;
+      viralAnalysisFailures = 0;
       viralAnalyzeBtn.disabled = true; viralAnalyzeBtn.textContent = '\u62c6\u89e3\u4e2d\u2026';
       draftGenerateBtn.disabled = true;
       viralAnalysisResult.style.display = 'block';
@@ -1795,6 +1824,8 @@ def render_page():
             const statusRes = await fetch('/api/ai/status?id=' + encodeURIComponent(payload.id));
             if (redirectIfUnauthorized(statusRes)) { clearInterval(viralAnalysisPollTimer); return; }
             const r = await statusRes.json();
+            if (!statusRes.ok) throw new Error(r.error || '\u7206\u6b3e\u62c6\u89e3\u72b6\u6001\u83b7\u53d6\u5931\u8d25');
+            viralAnalysisFailures = 0;
             if (r.status === 'done') {
               clearInterval(viralAnalysisPollTimer);
               viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u5b8c\u6210';
@@ -1807,7 +1838,15 @@ def render_page():
               viralAnalysisContent.innerHTML = '<p style="color:var(--seal-red)">' + escapeHtml(r.error) + '</p>';
               viralAnalyzeBtn.disabled = false; viralAnalyzeBtn.textContent = '\u5f00\u59cb\u7206\u6b3e\u62c6\u89e3';
             } else { viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u4e2d\u2026'; }
-          } catch (e) {}
+          } catch (e) {
+            viralAnalysisFailures += 1;
+            if (viralAnalysisFailures >= 3) {
+              clearInterval(viralAnalysisPollTimer);
+              viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u72b6\u6001\u83b7\u53d6\u5931\u8d25';
+              viralAnalysisContent.innerHTML = '<p style="color:var(--seal-red)">' + escapeHtml(e.message || '\u7f51\u7edc\u5f02\u5e38') + '</p>';
+              viralAnalyzeBtn.disabled = false; viralAnalyzeBtn.textContent = '\u5f00\u59cb\u7206\u6b3e\u62c6\u89e3';
+            }
+          }
         }, 1500);
       } catch (error) {
         viralAnalysisContent.innerHTML = '<p style="color:var(--seal-red)">' + escapeHtml(error.message) + '</p>';
@@ -1817,6 +1856,7 @@ def render_page():
 
     draftGenerateBtn.addEventListener('click', async function() {
       if (!currentViralJobId) return;
+      draftFailures = 0;
       draftGenerateBtn.disabled = true; draftGenerateBtn.textContent = '\u751f\u6210\u4e2d\u2026';
       resetDraftPreview('\u8349\u7a3f\u751f\u6210\u4e2d\u2026');
       try {
@@ -1839,6 +1879,8 @@ def render_page():
             const statusRes = await fetch('/api/ai/status?id=' + encodeURIComponent(payload.id));
             if (redirectIfUnauthorized(statusRes)) { clearInterval(draftPollTimer); return; }
             const r = await statusRes.json();
+            if (!statusRes.ok) throw new Error(r.error || '\u8349\u7a3f\u72b6\u6001\u83b7\u53d6\u5931\u8d25');
+            draftFailures = 0;
             if (r.status === 'done') {
               clearInterval(draftPollTimer);
               draftRawMarkdown = r.result || '';
@@ -1851,7 +1893,14 @@ def render_page():
               draftStatus.textContent = '\u8349\u7a3f\u751f\u6210\u5931\u8d25\uff1a' + (r.error || '\u672a\u77e5\u9519\u8bef');
               draftGenerateBtn.disabled = false; draftGenerateBtn.textContent = '\u751f\u6210\u8349\u7a3f';
             } else { draftStatus.textContent = '\u8349\u7a3f\u751f\u6210\u4e2d\u2026'; }
-          } catch (e) {}
+          } catch (e) {
+            draftFailures += 1;
+            if (draftFailures >= 3) {
+              clearInterval(draftPollTimer);
+              draftStatus.textContent = '\u8349\u7a3f\u72b6\u6001\u83b7\u53d6\u5931\u8d25\uff1a' + (e.message || '\u7f51\u7edc\u5f02\u5e38');
+              draftGenerateBtn.disabled = false; draftGenerateBtn.textContent = '\u751f\u6210\u8349\u7a3f';
+            }
+          }
         }, 1500);
       } catch (error) {
         draftStatus.textContent = error.message;
