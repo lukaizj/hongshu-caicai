@@ -360,6 +360,87 @@ def get_ai_result(aid):
         return dict(r)
 
 
+def build_draft_prompt(notes_text, comments_text, source_analysis, style_profile, topic_angle, target_audience, tone, draft_count, include_image_prompts):
+    system_prompt = """你是一位小红书内容策划和原创改写专家。你的任务是基于爆款样本提炼结构，但必须生成原创内容，不能照抄标题、正文、图片描述或品牌表达。
+
+输出必须使用 Markdown，结构固定为：
+# 标题候选
+# 正文草稿
+# 封面文案
+# 配图建议 / 图片生成提示词
+# 标签
+# 发布前检查
+# 原创改写与风险提醒
+
+要求：
+- 标题候选数量不少于 5 个。
+- 正文要适合小红书发布，包含开头钩子、主体段落、结尾互动引导。
+- 标签控制在 8-15 个。
+- 不使用“复制”“仿写”“搬运”等表述。
+- 风格要贴合用户给定账号定位，不要机械堆关键词。"""
+    image_prompt_rule = "请为每篇草稿输出封面图和正文配图的图片生成提示词。" if include_image_prompts else "不需要输出图片生成提示词，只输出配图方向。"
+    user_message = f"""# 创作目标
+
+- 账号定位 / 风格描述：{style_profile or '未提供'}
+- 切入选题角度：{topic_angle or '请基于样本自行建议'}
+- 目标人群：{target_audience or '未提供'}
+- 语气：{tone or '自然、有用、有记忆点'}
+- 生成篇数：{draft_count}
+- 图片要求：{image_prompt_rule}
+
+# 已有爆款拆解
+
+{source_analysis or '（无单独爆款拆解结果，请直接基于样本数据判断。）'}
+
+# 爆款样本笔记数据
+
+{notes_text or '（无笔记数据）'}
+
+# 评论数据
+
+{comments_text or '（无评论数据）'}
+"""
+    return system_prompt, user_message
+
+
+def run_draft_generation(draft_id, job, draft_request, ai_config):
+    try:
+        store_ai_result(draft_id, status="running", result="", error="", type="draft", job_id=job.get("id", ""))
+        notes_text, comments_text = read_excel_files_for_job(job)
+        if not notes_text and not comments_text:
+            raise ValueError("未找到可生成草稿的 Excel 数据，请确认采集已完成")
+
+        system_prompt, user_message = build_draft_prompt(
+            notes_text,
+            comments_text,
+            draft_request.get("source_analysis", ""),
+            draft_request.get("style_profile", ""),
+            draft_request.get("topic_angle", ""),
+            draft_request.get("target_audience", ""),
+            draft_request.get("tone", ""),
+            draft_request.get("draft_count", 1),
+            draft_request.get("include_image_prompts", True),
+        )
+        result = call_llm(ai_config["provider"], ai_config["api_key"], ai_config["model"], system_prompt, user_message)
+        store_ai_result(
+            draft_id,
+            status="done",
+            result=result,
+            error="",
+            type="draft",
+            job_id=job.get("id", ""),
+            title="小红书草稿",
+            completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            metadata={
+                "tone": draft_request.get("tone", ""),
+                "draft_count": draft_request.get("draft_count", 1),
+                "include_image_prompts": draft_request.get("include_image_prompts", True),
+            },
+        )
+    except Exception as exc:
+        store_ai_result(draft_id, status="error", result="", error=str(exc), type="draft")
+
+
 def run_analysis(analysis_id, job, skill_type, custom_prompt, provider, api_key, model):
     try:
         store_ai_result(analysis_id, status="running", result="", error="")

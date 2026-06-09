@@ -103,6 +103,21 @@ def validate_count(raw_count):
     return count
 
 
+def validate_choice(raw_value, allowed, default=0):
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = default
+    return value if value in allowed else default
+
+
+def validate_text_field(value, field_name, max_length):
+    value = (value or "").strip()
+    if len(value) > max_length:
+        raise ValueError(f"{field_name}不能超过 {max_length} 个字符")
+    return value
+
+
 def validate_cookie_string(cookies_str):
     cookies_str = (cookies_str or "").strip()
     if not cookies_str:
@@ -318,14 +333,19 @@ def get_job(job_id):
         return json.loads(json.dumps(job, ensure_ascii=False))
 
 
-def create_job(keyword, count, with_comments):
+def create_job(keyword, count, with_comments, job_options=None):
+    options = job_options or {}
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
         "state": "queued",
+        "workflow": options.get("workflow", "collect"),
         "keyword": keyword,
         "count": count,
         "with_comments": with_comments,
+        "sort_type_choice": options.get("sort_type_choice", 0),
+        "note_type": options.get("note_type", 0),
+        "note_time": options.get("note_time", 0),
         "stage": "queued",
         "percent": 0,
         "message": "任务已排队",
@@ -342,7 +362,8 @@ def create_job(keyword, count, with_comments):
     return job_id
 
 
-def run_job(job_id, keyword, count, with_comments):
+def run_job(job_id, keyword, count, with_comments, search_options=None):
+    search_options = search_options or {}
     try:
         update_job(job_id, state="running", stage="init", percent=5, message="读取 Cookie 与输出目录")
         add_event(job_id, "读取配置", "从 .env 加载 COOKIES")
@@ -383,6 +404,9 @@ def run_job(job_id, keyword, count, with_comments):
             cookies_str,
             base_path,
             "excel",
+            sort_type_choice=search_options.get("sort_type_choice", 0),
+            note_type=search_options.get("note_type", 0),
+            note_time=search_options.get("note_time", 0),
             progress_callback=progress_callback,
         )
         if not success:
@@ -733,6 +757,7 @@ def render_page():
 
   <nav class="nav-bar">
     <button class="nav-tab active" data-panel="collect">\u91c7\u96c6\u5de5\u4f5c\u53f0</button>
+    <button class="nav-tab" data-panel="viral">\u7206\u6b3e\u5de5\u4f5c\u53f0</button>
     <button class="nav-tab" data-panel="cookie">Cookie \u7ba1\u7406</button>
     <button class="nav-tab" data-panel="ai">AI \u5206\u6790</button>
   </nav>
@@ -855,7 +880,144 @@ def render_page():
     </div>
   </div>
 
-  <!-- ── Tab 2: Cookie \u7ba1\u7406 ── -->
+  <!-- ── Viral 工作台 ── -->
+  <div class="tab-panel" id="panelViral">
+    <div class="panel-grid">
+      <form id="viralForm" class="card card-padded command">
+        <h2 class="section-title">爆款采集</h2>
+        <p class="hint">按热度排序采集对标笔记，后续用于爆款拆解和自有风格草稿生成。</p>
+        <label for="viralKeyword">关键词</label>
+        <input id="viralKeyword" name="keyword" type="text" maxlength="80" placeholder="如：苏州探店、职场穿搭、育儿好物">
+        <div class="row">
+          <div>
+            <label for="viralCount">采集数量</label>
+            <input id="viralCount" name="count" type="number" min="1" max=""" + str(MAX_COUNT) + """" value="10">
+          </div>
+          <div>
+            <label for="viralSort">热度排序</label>
+            <select id="viralSort" name="sort_type_choice">
+              <option value="2">最多点赞</option>
+              <option value="3">最多评论</option>
+              <option value="4">最多收藏</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="viralNoteType">笔记类型</label>
+            <select id="viralNoteType" name="note_type">
+              <option value="0">不限</option>
+              <option value="1">视频</option>
+              <option value="2">图文</option>
+            </select>
+          </div>
+          <div>
+            <label for="viralNoteTime">发布时间</label>
+            <select id="viralNoteTime" name="note_time">
+              <option value="0">不限</option>
+              <option value="1">一天内</option>
+              <option value="2">一周内</option>
+              <option value="3">半年内</option>
+            </select>
+          </div>
+        </div>
+        <div class="switch-line">
+          <div class="switch-copy"><strong>同步采集评论</strong><span>评论可辅助提炼痛点，建议小批量开启</span></div>
+          <label class="switch"><input id="viralWithComments" name="with_comments" type="checkbox"><span class="slider"></span></label>
+        </div>
+        <button id="viralStartBtn" class="primary" type="submit">采集爆款样本</button>
+      </form>
+
+      <section class="card card-padded">
+        <div class="dossier-head">
+          <div>
+            <div class="overline">VIRAL PIPELINE</div>
+            <h2 class="section-title" style="margin-bottom:0">工作台进度</h2>
+          </div>
+          <div id="viralState" class="state">待命</div>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span>目标</span><strong id="viralMTarget">0</strong></div>
+          <div class="metric"><span>笔记</span><strong id="viralMNotes">0</strong></div>
+          <div class="metric"><span>评论</span><strong id="viralMComments">0</strong></div>
+          <div class="metric"><span>失败</span><strong id="viralMFailed">0</strong></div>
+        </div>
+        <div class="progress-top"><span id="viralMessage">等待任务</span><span id="viralPercent">0%</span></div>
+        <div class="track"><div id="viralFill" class="fill"></div></div>
+        <div id="viralDownloads" class="downloads"></div>
+        <div id="viralEvents" class="events"></div>
+      </section>
+    </div>
+
+    <div class="panel-grid" style="margin-top:18px">
+      <section class="card card-padded">
+        <div class="overline">AGENT ANALYSIS</div>
+        <h2 class="section-title">爆款拆解</h2>
+        <p class="hint">采集完成后，Agent 会提炼标题公式、开头钩子、正文结构、封面共性、标签策略和风险点。</p>
+        <button id="viralAnalyzeBtn" class="primary" type="button" disabled>开始爆款拆解</button>
+        <div id="viralAnalyzeNoConfig" style="display:none;padding:12px;border:1px dashed var(--line);background:rgba(255,250,241,.5);margin-top:12px;font-size:13px;color:var(--ink-soft)">AI 未配置，请先去 AI 分析页配置 API Key。</div>
+        <div id="viralAnalysisResult" style="display:none;margin-top:14px">
+          <div class="progress-top"><span id="viralAnalysisStatus">分析中…</span></div>
+          <div id="viralAnalysisContent" style="padding:14px;border:1px solid var(--line);background:rgba(255,250,241,.62);font-size:14px;line-height:1.7;max-height:420px;overflow:auto;white-space:pre-wrap;font-family:var(--font-body)"></div>
+        </div>
+      </section>
+
+      <section class="card card-padded">
+        <div class="overline">OWN STYLE DRAFT</div>
+        <h2 class="section-title">自有风格草稿</h2>
+        <label for="draftStyleProfile">账号定位 / 风格描述</label>
+        <textarea id="draftStyleProfile" placeholder="如：苏州本地生活，语气真实克制，偏实用攻略，不夸张种草"></textarea>
+        <label for="draftTopicAngle">切入选题角度</label>
+        <input id="draftTopicAngle" type="text" placeholder="如：周末半日游路线、低预算探店、职场新人避坑">
+        <label for="draftAudience">目标人群</label>
+        <input id="draftAudience" type="text" placeholder="如：苏州 25-35 岁上班族、宝妈、新手运营">
+        <div class="row">
+          <div>
+            <label for="draftTone">语气</label>
+            <select id="draftTone">
+              <option value="专业干货">专业干货</option>
+              <option value="朋友聊天">朋友聊天</option>
+              <option value="真实种草">真实种草</option>
+              <option value="情绪共鸣">情绪共鸣</option>
+            </select>
+          </div>
+          <div>
+            <label for="draftCount">生成篇数</label>
+            <select id="draftCount">
+              <option value="1">1 篇</option>
+              <option value="2">2 篇</option>
+              <option value="3">3 篇</option>
+            </select>
+          </div>
+        </div>
+        <div class="switch-line">
+          <div class="switch-copy"><strong>包含图片提示词</strong><span>先生成提示词，不调用生图模型</span></div>
+          <label class="switch"><input id="draftImagePrompts" type="checkbox" checked><span class="slider"></span></label>
+        </div>
+        <button id="draftGenerateBtn" class="primary" type="button" disabled>生成草稿</button>
+        <div style="display:flex;gap:10px;margin-top:10px">
+          <button id="imageGenerateBtn" class="secondary" type="button" disabled style="flex:1;margin-top:0">生成图片（待接入）</button>
+          <button id="publishBtn" class="secondary" type="button" disabled style="flex:1;margin-top:0">一键发布（暂不开放）</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="card card-padded" style="margin-top:18px">
+      <div class="dossier-head">
+        <div>
+          <div class="overline">PREVIEW</div>
+          <h2 class="section-title" style="margin-bottom:0">笔记预览</h2>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button id="draftCopyBtn" class="secondary" type="button" disabled style="margin-top:0">复制全文</button>
+          <button id="draftDownloadBtn" class="secondary" type="button" disabled style="margin-top:0">下载 Markdown</button>
+        </div>
+      </div>
+      <div id="draftStatus" class="hint">生成草稿后在这里预览。发布前请人工检查原创度、事实准确性和平台规则。</div>
+      <div id="draftPreview" style="margin-top:12px;padding:16px;border:1px solid var(--line);background:rgba(255,250,241,.62);font-size:14px;line-height:1.7;min-height:140px;max-height:620px;overflow:auto;white-space:pre-wrap;font-family:var(--font-body)"></div>
+    </section>
+  </div>
+
   <div class="tab-panel" id="panelCookie">
     <div class="auth-grid">
       <section class="card card-padded">
@@ -929,7 +1091,7 @@ def render_page():
     </div>
   </div>
 
-  <!-- ── Tab 3: AI 分析 ── -->
+  <!-- ── AI 分析 ── -->
   <div class="tab-panel" id="panelAi">
     <div class="panel-grid">
       <section class="card card-padded">
@@ -1027,18 +1189,57 @@ def render_page():
     const aiResult = document.getElementById('aiResult');
     const aiStatusText = document.getElementById('aiStatusText');
     const aiResultContent = document.getElementById('aiResultContent');
+    const viralForm = document.getElementById('viralForm');
+    const viralStartBtn = document.getElementById('viralStartBtn');
+    const viralState = document.getElementById('viralState');
+    const viralMessage = document.getElementById('viralMessage');
+    const viralPercent = document.getElementById('viralPercent');
+    const viralFill = document.getElementById('viralFill');
+    const viralMTarget = document.getElementById('viralMTarget');
+    const viralMNotes = document.getElementById('viralMNotes');
+    const viralMComments = document.getElementById('viralMComments');
+    const viralMFailed = document.getElementById('viralMFailed');
+    const viralDownloads = document.getElementById('viralDownloads');
+    const viralEvents = document.getElementById('viralEvents');
+    const viralAnalyzeBtn = document.getElementById('viralAnalyzeBtn');
+    const viralAnalyzeNoConfig = document.getElementById('viralAnalyzeNoConfig');
+    const viralAnalysisResult = document.getElementById('viralAnalysisResult');
+    const viralAnalysisStatus = document.getElementById('viralAnalysisStatus');
+    const viralAnalysisContent = document.getElementById('viralAnalysisContent');
+    const draftStyleProfile = document.getElementById('draftStyleProfile');
+    const draftTopicAngle = document.getElementById('draftTopicAngle');
+    const draftAudience = document.getElementById('draftAudience');
+    const draftTone = document.getElementById('draftTone');
+    const draftCount = document.getElementById('draftCount');
+    const draftImagePrompts = document.getElementById('draftImagePrompts');
+    const draftGenerateBtn = document.getElementById('draftGenerateBtn');
+    const draftStatus = document.getElementById('draftStatus');
+    const draftPreview = document.getElementById('draftPreview');
+    const draftCopyBtn = document.getElementById('draftCopyBtn');
+    const draftDownloadBtn = document.getElementById('draftDownloadBtn');
     const reduceMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let pollTimer = null;
     let phoneSessionId = '';
     let aiPollTimer = null;
+    let viralPollTimer = null;
+    let viralAnalysisPollTimer = null;
+    let draftPollTimer = null;
+    let viralJobPollInFlight = false;
+    let viralAnalysisFailures = 0;
+    let draftFailures = 0;
     let aiConfigured = false;
     let currentJobId = '';
+    let currentViralJobId = '';
+    let viralAnalysisId = '';
+    let draftRawMarkdown = '';
     let fillLoopTween = null;
     let activeStepTween = null;
     let lastStage = '';
     let lastState = '';
     let lastEventsKey = '';
     let lastDownloadsKey = '';
+    let lastViralEventsKey = '';
+    let lastViralDownloadsKey = '';
 
     function hasGsap() { return Boolean(window.gsap); }
     function prefersReducedMotion() { return reduceMotionQuery.matches; }
@@ -1140,6 +1341,34 @@ def render_page():
       }
       lastDownloadsKey = key;
     }
+    function setViralJobState(job) {
+      const labels = { queued: '排队中', running: '采集中', success: '已完成', failed: '异常' };
+      viralState.textContent = labels[job.state] || '待命';
+      viralState.className = 'state ' + (job.state || '');
+      viralMessage.textContent = job.message || '等待任务';
+      viralPercent.textContent = (job.percent || 0) + '%';
+      viralFill.style.width = Math.max(0, Math.min(100, Number(job.percent || 0))) + '%';
+      viralFill.className = 'fill ' + (job.state === 'running' ? 'running' : '');
+      viralMTarget.textContent = job.count || 0;
+      viralMNotes.textContent = job.metrics?.notes || 0;
+      viralMComments.textContent = job.metrics?.comments || 0;
+      viralMFailed.textContent = job.metrics?.failed_comments || 0;
+      viralDownloads.innerHTML = (job.downloads || []).map(function(item) {
+        return '<a class="download" href="/download?file=' + encodeURIComponent(item.file) + '">↓ ' + escapeHtml(item.label) + '</a>';
+      }).join('');
+      viralEvents.innerHTML = (job.events || []).slice().reverse().map(function(event) {
+        return '<div class="event ' + (event.level||'info') + '"><time>' + event.time + '</time><div><b>' + escapeHtml(event.title) + '</b><br>' + escapeHtml(event.detail||'') + '</div></div>';
+      }).join('');
+    }
+
+    function resetDraftPreview(message) {
+      draftRawMarkdown = '';
+      draftStatus.textContent = message || '生成草稿后在这里预览。发布前请人工检查原创度、事实准确性和平台规则。';
+      draftPreview.innerHTML = '';
+      draftCopyBtn.disabled = true;
+      draftDownloadBtn.disabled = true;
+    }
+
     function bindPressMotion(selector) {
       document.querySelectorAll(selector).forEach(function(el) {
         el.addEventListener('pointerdown', function() {
@@ -1362,6 +1591,10 @@ def render_page():
         const cfg = await res.json();
         aiConfigured = cfg.configured && cfg.enabled;
         aiProvider.value = cfg.provider || ''; aiModel.value = cfg.model || ''; aiEnabled.checked = !!cfg.enabled;
+        if (currentViralJobId) {
+          viralAnalyzeBtn.disabled = !aiConfigured;
+          viralAnalyzeNoConfig.style.display = aiConfigured ? 'none' : 'block';
+        }
         if (cfg.configured) {
           aiConfigStatus.textContent = cfg.provider_label + ' \u00b7 ' + (cfg.model || '(\u9ed8\u8ba4\u6a21\u578b)') + ' \u00b7 \u5bc6\u94a5 ' + cfg.key_masked;
           aiConfigStatus.className = 'cookie-status ok';
@@ -1380,6 +1613,10 @@ def render_page():
         const payload = await res.json();
         if (!res.ok) throw new Error(payload.error || '\u4fdd\u5b58\u5931\u8d25');
         aiConfigured = payload.configured && payload.enabled;
+        if (currentViralJobId) {
+          viralAnalyzeBtn.disabled = !aiConfigured;
+          viralAnalyzeNoConfig.style.display = aiConfigured ? 'none' : 'block';
+        }
         aiConfigStatus.textContent = payload.configured ? (payload.provider_label + ' \u00b7 ' + (payload.model || '(\u9ed8\u8ba4\u6a21\u578b)') + ' \u00b7 \u5bc6\u94a5 ' + payload.key_masked) : '\u672a\u914d\u7f6e';
         aiConfigStatus.className = 'cookie-status ' + (payload.configured ? 'ok' : '');
         aiApiKey.value = '';
@@ -1492,6 +1729,154 @@ def render_page():
         } catch (e) {}
       }, 1500);
     }
+
+    async function pollViralJob(jobId) {
+      const res = await fetch('/api/status?id=' + encodeURIComponent(jobId));
+      if (redirectIfUnauthorized(res)) return;
+      const job = await res.json();
+      setViralJobState(job);
+      if (job.state === 'success' || job.state === 'failed') {
+        clearInterval(viralPollTimer); viralPollTimer = null;
+        viralStartBtn.disabled = false; viralStartBtn.textContent = '\u91c7\u96c6\u7206\u6b3e\u6837\u672c';
+        if (job.state === 'success') {
+          currentViralJobId = job.id;
+          viralAnalyzeBtn.disabled = !aiConfigured;
+          viralAnalyzeNoConfig.style.display = aiConfigured ? 'none' : 'block';
+          draftGenerateBtn.disabled = true;
+          triggerConfetti();
+        }
+      }
+    }
+
+    viralForm.addEventListener('submit', async function(event) {
+      event.preventDefault();
+      clearInterval(viralPollTimer); clearInterval(viralAnalysisPollTimer); clearInterval(draftPollTimer);
+      viralAnalysisId = ''; currentViralJobId = '';
+      viralAnalysisResult.style.display = 'none'; viralAnalysisContent.innerHTML = '';
+      viralAnalyzeBtn.disabled = true; draftGenerateBtn.disabled = true;
+      resetDraftPreview();
+      viralStartBtn.disabled = true; viralStartBtn.textContent = '\u4efb\u52a1\u542f\u52a8\u4e2d';
+      const data = new URLSearchParams(new FormData(viralForm));
+      data.set('mode', 'viral');
+      try {
+        const res = await fetch('/api/start', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '\u7206\u6b3e\u91c7\u96c6\u542f\u52a8\u5931\u8d25');
+        await pollViralJob(payload.id);
+        viralPollTimer = setInterval(function() { pollViralJob(payload.id); }, 1200);
+      } catch (error) {
+        setViralJobState({ state: 'failed', percent: 100, message: error.message, events: [{ time: new Date().toLocaleTimeString(), title: '\u542f\u52a8\u5931\u8d25', detail: error.message, level: 'error' }], metrics: {} });
+        viralStartBtn.disabled = false; viralStartBtn.textContent = '\u91c7\u96c6\u7206\u6b3e\u6837\u672c';
+      }
+    });
+
+    viralAnalyzeBtn.addEventListener('click', async function() {
+      if (!currentViralJobId) return;
+      viralAnalyzeBtn.disabled = true; viralAnalyzeBtn.textContent = '\u62c6\u89e3\u4e2d\u2026';
+      draftGenerateBtn.disabled = true;
+      viralAnalysisResult.style.display = 'block';
+      viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u4e2d\u2026';
+      viralAnalysisContent.innerHTML = '<p style="color:var(--muted)">\u6b63\u5728\u8bfb\u53d6\u6837\u672c\u5e76\u8c03\u7528 AI \u62c6\u89e3\u7206\u6b3e\u7ed3\u6784\u2026</p>';
+      const prompt = '\u8bf7\u8f93\u51fa\uff1a1. \u7206\u6b3e\u6807\u9898\u516c\u5f0f\uff1b2. \u5f00\u5934\u94a9\u5b50\u6a21\u5f0f\uff1b3. \u6b63\u6587\u7ed3\u6784\u6a21\u677f\uff1b4. \u56fe\u7247/\u5c01\u9762\u5171\u6027\uff1b5. \u6807\u7b7e\u7b56\u7565\uff1b6. \u53ef\u4ee5\u8fc1\u79fb\u5230\u6211\u8d26\u53f7\u98ce\u683c\u7684\u521b\u4f5c\u5efa\u8bae\uff1b7. \u907f\u514d\u6284\u88ad\u548c\u5e73\u53f0\u98ce\u9669\u7684\u6ce8\u610f\u4e8b\u9879\u3002';
+      try {
+        const data = new URLSearchParams();
+        data.set('job_id', currentViralJobId);
+        data.set('skill_type', 'viral');
+        data.set('custom_prompt', prompt);
+        const res = await fetch('/api/ai/analyze', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '\u7206\u6b3e\u62c6\u89e3\u542f\u52a8\u5931\u8d25');
+          viralAnalysisId = payload.id;
+        clearInterval(viralAnalysisPollTimer);
+        viralAnalysisPollTimer = setInterval(async function() {
+          try {
+            const statusRes = await fetch('/api/ai/status?id=' + encodeURIComponent(payload.id));
+            if (redirectIfUnauthorized(statusRes)) { clearInterval(viralAnalysisPollTimer); return; }
+            const r = await statusRes.json();
+            if (r.status === 'done') {
+              clearInterval(viralAnalysisPollTimer);
+              viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u5b8c\u6210';
+              viralAnalysisContent.innerHTML = renderMarkdown(r.result);
+              viralAnalyzeBtn.disabled = false; viralAnalyzeBtn.textContent = '\u91cd\u65b0\u62c6\u89e3';
+              draftGenerateBtn.disabled = false;
+            } else if (r.status === 'error') {
+              clearInterval(viralAnalysisPollTimer);
+              viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u5931\u8d25';
+              viralAnalysisContent.innerHTML = '<p style="color:var(--seal-red)">' + escapeHtml(r.error) + '</p>';
+              viralAnalyzeBtn.disabled = false; viralAnalyzeBtn.textContent = '\u5f00\u59cb\u7206\u6b3e\u62c6\u89e3';
+            } else { viralAnalysisStatus.textContent = '\u7206\u6b3e\u62c6\u89e3\u4e2d\u2026'; }
+          } catch (e) {}
+        }, 1500);
+      } catch (error) {
+        viralAnalysisContent.innerHTML = '<p style="color:var(--seal-red)">' + escapeHtml(error.message) + '</p>';
+        viralAnalyzeBtn.disabled = false; viralAnalyzeBtn.textContent = '\u5f00\u59cb\u7206\u6b3e\u62c6\u89e3';
+      }
+    });
+
+    draftGenerateBtn.addEventListener('click', async function() {
+      if (!currentViralJobId) return;
+      draftGenerateBtn.disabled = true; draftGenerateBtn.textContent = '\u751f\u6210\u4e2d\u2026';
+      resetDraftPreview('\u8349\u7a3f\u751f\u6210\u4e2d\u2026');
+      try {
+        const data = new URLSearchParams();
+        data.set('job_id', currentViralJobId);
+        data.set('source_analysis_id', viralAnalysisId);
+        data.set('style_profile', draftStyleProfile.value);
+        data.set('topic_angle', draftTopicAngle.value);
+        data.set('target_audience', draftAudience.value);
+        data.set('tone', draftTone.value);
+        data.set('draft_count', draftCount.value);
+        data.set('include_image_prompts', draftImagePrompts.checked ? '1' : '0');
+        const res = await fetch('/api/ai/draft', { method: 'POST', body: data });
+        if (redirectIfUnauthorized(res)) return;
+        const payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '\u8349\u7a3f\u751f\u6210\u542f\u52a8\u5931\u8d25');
+        clearInterval(draftPollTimer);
+        draftPollTimer = setInterval(async function() {
+          try {
+            const statusRes = await fetch('/api/ai/status?id=' + encodeURIComponent(payload.id));
+            if (redirectIfUnauthorized(statusRes)) { clearInterval(draftPollTimer); return; }
+            const r = await statusRes.json();
+            if (r.status === 'done') {
+              clearInterval(draftPollTimer);
+              draftRawMarkdown = r.result || '';
+              draftStatus.textContent = '\u8349\u7a3f\u751f\u6210\u5b8c\u6210\u3002\u751f\u56fe\u548c\u4e00\u952e\u53d1\u5e03\u6682\u4e0d\u5f00\u653e\uff0c\u8bf7\u4eba\u5de5\u68c0\u67e5\u540e\u590d\u5236\u53d1\u5e03\u3002';
+              draftPreview.innerHTML = renderMarkdown(draftRawMarkdown);
+              draftCopyBtn.disabled = false; draftDownloadBtn.disabled = false;
+              draftGenerateBtn.disabled = false; draftGenerateBtn.textContent = '\u91cd\u65b0\u751f\u6210\u8349\u7a3f';
+            } else if (r.status === 'error') {
+              clearInterval(draftPollTimer);
+              draftStatus.textContent = '\u8349\u7a3f\u751f\u6210\u5931\u8d25\uff1a' + (r.error || '\u672a\u77e5\u9519\u8bef');
+              draftGenerateBtn.disabled = false; draftGenerateBtn.textContent = '\u751f\u6210\u8349\u7a3f';
+            } else { draftStatus.textContent = '\u8349\u7a3f\u751f\u6210\u4e2d\u2026'; }
+          } catch (e) {}
+        }, 1500);
+      } catch (error) {
+        draftStatus.textContent = error.message;
+        draftGenerateBtn.disabled = false; draftGenerateBtn.textContent = '\u751f\u6210\u8349\u7a3f';
+      }
+    });
+
+    draftCopyBtn.addEventListener('click', async function() {
+      if (!draftRawMarkdown) return;
+      await navigator.clipboard.writeText(draftRawMarkdown);
+      draftStatus.textContent = '\u5df2\u590d\u5236\u5168\u6587\u3002';
+    });
+
+    draftDownloadBtn.addEventListener('click', function() {
+      if (!draftRawMarkdown) return;
+      const blob = new Blob([draftRawMarkdown], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'hongshu-draft-' + new Date().toISOString().slice(0, 10) + '.md';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
 
     reduceMotionQuery.addEventListener('change', function() {
       if (!prefersReducedMotion()) return;
@@ -2032,6 +2417,11 @@ class SpiderHandler(BaseHTTPRequestHandler):
                 return
             self.handle_ai_analyze()
             return
+        if parsed.path == "/api/ai/draft":
+            if not self.require_auth(parsed.path):
+                return
+            self.handle_ai_draft()
+            return
         self.send_error(404)
 
     def is_authenticated(self):
@@ -2064,7 +2454,7 @@ class SpiderHandler(BaseHTTPRequestHandler):
         form = urllib.parse.parse_qs(body)
         try:
             mode = form.get("mode", ["keyword"])[0]
-            with_comments = form.get("with_comments", [""])[0] == "on"
+            with_comments = form.get("with_comments", [""])[0] in ("on", "1", "true")
 
             if mode == "url":
                 note_url = form.get("note_url", [""])[0].strip()
@@ -2088,6 +2478,28 @@ class SpiderHandler(BaseHTTPRequestHandler):
                 keyword = f"{user_id}"
                 job_id = create_job(keyword, 50, with_comments)
                 thread = threading.Thread(target=run_job_user, args=(job_id, user_url, with_comments), daemon=True)
+                thread.start()
+                self.send_json({"id": job_id}, 202)
+
+            elif mode == "viral":
+                keyword = validate_keyword(form.get("keyword", [""])[0])
+                count = validate_count(form.get("count", ["10"])[0])
+                sort_type_choice = validate_choice(form.get("sort_type_choice", ["2"])[0], {2, 3, 4}, 2)
+                note_type = validate_choice(form.get("note_type", ["0"])[0], {0, 1, 2}, 0)
+                note_time = validate_choice(form.get("note_time", ["0"])[0], {0, 1, 2, 3}, 0)
+                search_options = {
+                    "workflow": "viral",
+                    "sort_type_choice": sort_type_choice,
+                    "note_type": note_type,
+                    "note_time": note_time,
+                }
+                job_id = create_job(keyword, count, with_comments, search_options)
+                thread = threading.Thread(
+                    target=run_job,
+                    args=(job_id, keyword, count, with_comments),
+                    kwargs={"search_options": search_options},
+                    daemon=True,
+                )
                 thread.start()
                 self.send_json({"id": job_id}, 202)
 
@@ -2299,6 +2711,61 @@ class SpiderHandler(BaseHTTPRequestHandler):
             )
             thread.start()
             self.send_json({"id": analysis_id}, 202)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+    def handle_ai_draft(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        form = urllib.parse.parse_qs(body)
+        try:
+            job_id = form.get("job_id", [""])[0]
+            source_analysis_id = form.get("source_analysis_id", [""])[0]
+            style_profile = validate_text_field(form.get("style_profile", [""])[0], "账号定位 / 风格描述", 800)
+            topic_angle = validate_text_field(form.get("topic_angle", [""])[0], "切入选题角度", 200)
+            target_audience = validate_text_field(form.get("target_audience", [""])[0], "目标人群", 200)
+            tone = validate_text_field(form.get("tone", [""])[0], "语气", 50)
+            include_image_prompts = form.get("include_image_prompts", ["0"])[0] in ("on", "1", "true")
+            draft_count = validate_choice(form.get("draft_count", ["1"])[0], {1, 2, 3}, 1)
+
+            config = ai_utils.load_ai_config()
+            if not config["configured"] or not config["enabled"]:
+                raise ValueError("AI 未配置或未启用，请先在 AI 设置中配置 API Key")
+
+            job = get_job(job_id)
+            if not job:
+                raise ValueError("任务不存在")
+            if job.get("state") != "success":
+                raise ValueError("采集任务尚未完成，请等待采集结束后再生成草稿")
+
+            source_analysis = ""
+            if source_analysis_id:
+                source = ai_utils.get_ai_result(source_analysis_id)
+                if source and source.get("status") == "done":
+                    source_analysis = source.get("result", "")
+
+            draft_request = {
+                "style_profile": style_profile,
+                "topic_angle": topic_angle,
+                "target_audience": target_audience,
+                "tone": tone,
+                "draft_count": draft_count,
+                "include_image_prompts": include_image_prompts,
+                "source_analysis": source_analysis,
+            }
+            ai_config = {
+                "provider": config["provider"],
+                "api_key": os.environ.get("AI_API_KEY", ""),
+                "model": config["model"],
+            }
+            draft_id = uuid.uuid4().hex[:12]
+            thread = threading.Thread(
+                target=ai_utils.run_draft_generation,
+                args=(draft_id, job, draft_request, ai_config),
+                daemon=True,
+            )
+            thread.start()
+            self.send_json({"id": draft_id}, 202)
         except Exception as exc:
             self.send_json({"error": str(exc)}, 400)
 
